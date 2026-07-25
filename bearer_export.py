@@ -2,6 +2,7 @@ import json
 import socket
 import threading
 import time
+import uuid
 from pathlib import Path
 
 
@@ -55,19 +56,32 @@ def build_bearer_records(session):
 class BearerEventPublisher:
     """Publish bearer lifecycle events to JSONL or a Unix datagram socket."""
 
-    def __init__(self, destination=None, clock=time.time):
+    def __init__(self, destination=None, clock=time.time, run_id=None):
         self.destination = destination
         self.clock = clock
+        self.run_id = run_id or uuid.uuid4().hex
         self._active = {}
         self._by_imsi = {}
         self._lock = threading.Lock()
         self._output = None
         self._sender = None
         self._opened_once = False
+        self._sequence = 0
+        self._published = 0
+        self._dropped = 0
 
     @property
     def enabled(self):
         return bool(self.destination)
+
+    @property
+    def stats(self):
+        with self._lock:
+            return {
+                'published': self._published,
+                'dropped': self._dropped,
+                'last_sequence': self._sequence,
+            }
 
     def sync(self, session):
         if not self.enabled:
@@ -114,7 +128,9 @@ class BearerEventPublisher:
                 self._sender = None
 
     def _publish(self, event, record):
-        payload = dict(record, event=event, timestamp=self.clock())
+        self._sequence += 1
+        payload = dict(record, event=event, timestamp=self.clock(),
+                       sequence=self._sequence, run_id=self.run_id)
         encoded = json.dumps(payload, sort_keys=True) + '\n'
         if str(self.destination).startswith('unix:'):
             target = str(self.destination)[5:]
@@ -124,7 +140,10 @@ class BearerEventPublisher:
                     self._sender.setblocking(False)
                 self._sender.sendto(encoded.rstrip().encode('utf-8'), target)
             except (BlockingIOError, FileNotFoundError, OSError):
+                self._dropped += 1
                 pass
+            else:
+                self._published += 1
             return
         path = Path(self.destination)
         try:
@@ -134,7 +153,9 @@ class BearerEventPublisher:
                 self._output = path.open(mode, encoding='utf-8', buffering=1)
                 self._opened_once = True
             self._output.write(encoded)
+            self._published += 1
         except OSError:
+            self._dropped += 1
             if self._output is not None:
                 self._output.close()
                 self._output = None

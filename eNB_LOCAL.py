@@ -64,6 +64,11 @@ def report_enb_status(status):
         logging.warning(f"Unable to write eNB status: {error}")
 
 
+def close_bearer_event_publisher():
+    logging.info("Bearer event publisher stats: %s", bearer_event_publisher.stats)
+    bearer_event_publisher.close()
+
+
 def configure_tun_ipv6(current_address, new_address, tun_number):
     tun_number = int(tun_number)
     if not 0 <= tun_number <= 255:
@@ -2697,7 +2702,7 @@ if __name__ == "__main__":
         parser.error(str(error))
     external_gtpu = options.external_gtpu
     bearer_event_publisher = BearerEventPublisher(options.bearer_events)
-    atexit.register(bearer_event_publisher.close)
+    atexit.register(close_bearer_event_publisher)
     options.serial_interface="/dev/ttyUSB2"
     sys_queue="/foo"
     if not external_gtpu:

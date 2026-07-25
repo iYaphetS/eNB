@@ -33,7 +33,8 @@ class BearerExportTest(unittest.TestCase):
     def test_publishes_lifecycle_without_duplicate_events(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'bearers.jsonl'
-            publisher = BearerEventPublisher(output, clock=lambda: 123.0)
+            publisher = BearerEventPublisher(
+                output, clock=lambda: 123.0, run_id='a' * 32)
             current = session()
             publisher.sync(current)
             publisher.sync(current)
@@ -46,6 +47,9 @@ class BearerExportTest(unittest.TestCase):
             self.assertEqual(
                 ['bearer-up', 'bearer-update', 'bearer-down'],
                 [event['event'] for event in events])
+            self.assertEqual([1, 2, 3], [event['sequence'] for event in events])
+            self.assertEqual(['a' * 32] * 3, [event['run_id'] for event in events])
+            self.assertEqual(3, publisher.stats['published'])
 
 
 if __name__ == '__main__':

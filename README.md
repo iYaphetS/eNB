@@ -169,15 +169,49 @@ the IMSI, UE and UPF addresses, eNB GTP-U address, bearer ID, and both TEIDs.
 The JSONL file represents the current simulator process and is reset when its
 first bearer event is written.
 
+For automatic manifest refresh, start the controller before the simulator:
+
+```
+python3 trex_session_controller.py --socket /tmp/enb-bearers.sock \
+  --output-template '/tmp/trex-sessions-{index}.json' --shards 8
+./simulator.py -P start-simulator --enbip 192.168.197.180 \
+  --mmeip 192.168.197.201 --gtpu-ip 192.168.198.10 --external-gtpu \
+  --bearer-events unix:/tmp/enb-bearers.sock
+```
+
+The controller batches rapid event bursts for 250 ms, detects sequence gaps,
+and atomically refreshes every shard after Attach, bearer update, or Detach.
+Events include a per-process `run_id`; when the simulator restarts, the
+controller clears stale sessions before accepting the new run. It requests a
+16 MiB Unix datagram receive buffer by default; check its startup log because
+Linux may cap the value through `net.core.rmem_max`. Normal bearer changes
+refresh only the affected IMSI shard; a simulator restart refreshes all shards.
+The controller maintains per-shard in-memory indexes, so rebuilding one shard
+does not scan all active sessions. Use `--compact` for 100k-scale manifests to
+reduce serialization time and file size.
+
+Run the offline scale check before a real testbed run:
+
+```
+python3 trex_scale_benchmark.py --users 100000 --shards 8
+```
+
+It reports event-ingest rate, manifest rendering time, and sessions per shard;
+it does not open sockets or send traffic.
+
 Build a snapshot for a TRex-side profile after subscribers are attached:
 
 ```
 python3 trex_adapter.py --events /var/log/sim/bearers.jsonl \
   --output /tmp/trex-sessions.json --uplink-pps 1000 \
-  --downlink-pps 1000 --payload-size 64
+  --downlink-pps 1000 --payload-size 64 --shards 8 --shard-index 0 --compact
 ```
 
-The generated manifest contains only currently active bearers. The included
+The generated manifest contains only currently active bearers. `--shards 8`
+and `--shard-index 0..7` produce deterministic IMSI partitions for separate
+TRex workers or ports. Bearer events carry a monotonic `sequence` number and
+the manifest reports sequence gaps. Manifest updates use atomic replacement,
+and the publisher logs published/dropped totals at simulator exit. The included
 `trex_gtpu_profile.py` consumes it directly from TRex STL and supports uplink
 and downlink UPF test traffic:
 
