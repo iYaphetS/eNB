@@ -147,6 +147,59 @@ requested load.
 This runner measures signaling load through the simulator's existing single
 SCTP association. It does not generate user-plane traffic or emulate multiple
 eNB SCTP associations.
+
+## External TRex user plane
+
+The simulator can keep S1AP/NAS signaling while delegating all GTP-U traffic
+generation to TRex. In this mode it does not create `brlo`, UE network
+namespaces or veth pairs, bind UDP port 2152, open an `AF_PACKET` socket, or
+start the internal GTP-U workers:
+
+```
+./simulator.py -P start-simulator \
+  --enbip 192.168.197.180 --mmeip 192.168.197.201 \
+  --gtpu-ip 192.168.198.10 --external-gtpu \
+  --bearer-events /var/log/sim/bearers.jsonl
+```
+
+`--gtpu-ip` is the eNB GTP-U endpoint advertised in S1AP and may differ from
+the SCTP signaling address. `--bearer-events` accepts either a JSONL path or a
+Unix datagram destination such as `unix:/tmp/enb-bearers.sock`. Events contain
+the IMSI, UE and UPF addresses, eNB GTP-U address, bearer ID, and both TEIDs.
+The JSONL file represents the current simulator process and is reset when its
+first bearer event is written.
+
+Build a snapshot for a TRex-side profile after subscribers are attached:
+
+```
+python3 trex_adapter.py --events /var/log/sim/bearers.jsonl \
+  --output /tmp/trex-sessions.json --uplink-pps 1000 \
+  --downlink-pps 1000 --payload-size 64
+```
+
+The generated manifest contains only currently active bearers. The included
+`trex_gtpu_profile.py` consumes it directly from TRex STL and supports uplink
+and downlink UPF test traffic:
+
+Start TRex in interactive stateless mode, open `trex-console`, and run:
+
+```
+start -f /opt/eNB/trex_gtpu_profile.py -m 1 \
+  -t manifest=/tmp/trex-sessions.json,direction=uplink,\
+src_mac=02:00:00:00:00:01,dst_mac=02:00:00:00:00:02
+```
+
+For uplink, run the profile on the TRex access-side port; it generates GTP-U
+packets with the UL TEID learned over S1AP. For downlink, select
+`direction=downlink` on the N6/data-network port; it sends plain IP packets to
+each UE address so the UPF under test must perform the downlink GTP-U
+encapsulation. The exported DL TEID can be used to validate captured access-
+side packets.
+
+A production 100k-user run should shard the manifest across TRex workers or
+ports; creating 100k independent STL streams on one port has significant
+control-plane and memory overhead. Packet transmission, NIC port mapping, MAC
+addressing, and UPF reachability must be validated on the target TRex/UPF host.
  
 
 

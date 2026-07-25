@@ -53,6 +53,17 @@ class CommandValidationTest(unittest.TestCase):
                 'load_result_socket': '/tmp/arbitrary.sock',
             })
 
+    def test_accepts_external_gtpu_start(self):
+        command = {
+            'procedure': 'start-simulator',
+            'enb_ip': '192.0.2.1',
+            'mme_ip': '192.0.2.2',
+            'gtpu_ip': '198.51.100.10',
+            'external_gtpu': True,
+            'bearer_events': '/var/log/sim/bearers.jsonl',
+        }
+        self.assertIs(command, validate_command(command))
+
 
 if __name__ == '__main__':
     unittest.main()

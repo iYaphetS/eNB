@@ -19,9 +19,14 @@ def validate_command(command):
     if not isinstance(procedure, str) or not PROCEDURE.fullmatch(procedure):
         raise ValueError('invalid or missing procedure')
 
-    for field in ('enb_ip', 'mme_ip'):
+    for field in ('enb_ip', 'mme_ip', 'gtpu_ip'):
         if command.get(field):
-            ipaddress.ip_address(command[field])
+            ipaddress.IPv4Address(command[field])
+    if command.get('external_gtpu') not in (None, False, True):
+        raise ValueError('external_gtpu must be a boolean')
+    bearer_events = command.get('bearer_events')
+    if bearer_events and ('\n' in bearer_events or '\r' in bearer_events):
+        raise ValueError('invalid bearer event destination')
     if command.get('imsi'):
         validate_imsi(command['imsi'])
     for field in ('ki', 'opc'):

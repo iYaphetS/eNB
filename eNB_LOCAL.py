@@ -35,12 +35,15 @@ from load_result_channel import LoadResultPublisher
 from network_runtime import NetworkRuntime
 from command_validation import validate_command
 from resource_registry import ResourceRegistry
+from bearer_export import BearerEventPublisher
 os.makedirs('/var/log/sim', exist_ok=True)
 logging.basicConfig(filename="/var/log/sim/tool.log",filemode='w',format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S',level=logging.DEBUG)
 logger = logging.getLogger('edge_log')
 load_result_publisher = LoadResultPublisher()
+bearer_event_publisher = BearerEventPublisher()
 network_runtime = NetworkRuntime()
 runtime_resources = ResourceRegistry()
+external_gtpu = False
 atexit.register(runtime_resources.close)
 
 
@@ -188,11 +191,24 @@ def ue_eth_pair(ue_pair_val=None):
 
 def upteid_get():
     global upteid
-    if upteid == 100000:
-        upteid = 1
-    else:
-        upteid+=1
+    upteid = (upteid % 0xffffffff) + 1
     return upteid
+
+
+def ensure_bearer_slot(session, bearer_id):
+    if bearer_id not in session['RAB-ID']:
+        session['RAB-ID'].append(bearer_id)
+        session['SGW-GTP-ADDRESS'].append(None)
+        session['SGW-TEID'].append(None)
+        session['ENB-TEID'].append(struct.pack('>I', upteid_get()))
+    return session['RAB-ID'].index(bearer_id)
+
+
+def sync_internal_gtp(session):
+    if external_gtpu or not session.get('GTP-KEY') or not session['SGW-TEID']:
+        return
+    gtp_dict[session['GTP-KEY']] = (
+        session['SGW-TEID'][-1], session['SGW-GTP-ADDRESS'][-1])
 
 def session_dict_initialization(session_dict):
 
@@ -210,6 +226,7 @@ def session_dict_initialization(session_dict):
     session_dict['RAB-ID'] = []
     session_dict['SGW-GTP-ADDRESS'] = []
     session_dict['SGW-TEID'] = []
+    session_dict['ENB-TEID'] = []
     
     session_dict['EPS-BEARER-IDENTITY'] = []
     session_dict['EPS-BEARER-TYPE'] = []  # default 0, dedicated 1
@@ -1429,8 +1446,9 @@ def ProcessDownlinkNAS(dic):
                                           
                                 dic['PDN-ADDRESS-IPV4'] = x[1] 
                                 dic['GTP-KEY']=socket.inet_aton(x[1])
-                                dic['UE-NAMESPACE']=ue_eth_pair()
-                                add_ns(dic['IMSI'],dic['UE-NAMESPACE'][0],dic['UE-NAMESPACE'][1],dic['PDN-ADDRESS-IPV4'])
+                                if not external_gtpu:
+                                    dic['UE-NAMESPACE']=ue_eth_pair()
+                                    add_ns(dic['IMSI'],dic['UE-NAMESPACE'][0],dic['UE-NAMESPACE'][1],dic['PDN-ADDRESS-IPV4'])
                                 #try:
                                 #    tap = TunTap(nic_type="Tap",nic_name=f"tun{dic['IMSI']}")
                                 #    dic['tap']=tap
@@ -1441,11 +1459,14 @@ def ProcessDownlinkNAS(dic):
        
                             elif x[0] == 'ipv6':
                                  #operating system will process Router Advertisement
-                                dic['PDN-ADDRESS-IPV6'] = configure_tun_ipv6(
-                                    dic['PDN-ADDRESS-IPV6'],
-                                    x[1],
-                                    dic['SESSION-TYPE-TUN'],
-                                )
+                                if external_gtpu:
+                                    dic['PDN-ADDRESS-IPV6'] = x[1]
+                                else:
+                                    dic['PDN-ADDRESS-IPV6'] = configure_tun_ipv6(
+                                        dic['PDN-ADDRESS-IPV6'],
+                                        x[1],
+                                        dic['SESSION-TYPE-TUN'],
+                                    )
                             
                     elif m[0] == 'access point name':
                         
@@ -1469,8 +1490,8 @@ def ProcessDownlinkNAS(dic):
         dic['NAS-ENC'] = nas_attach_complete(dic['EPS-BEARER-IDENTITY'][position])
         dic['UP-COUNT'] += 1 
         dic['DIR'] = 0
-        global gtp_dict
-        gtp_dict[dic['GTP-KEY']] =((dic['SGW-TEID'])[-1],(dic['SGW-GTP-ADDRESS'])[-1])
+        sync_internal_gtp(dic)
+        bearer_event_publisher.sync(dic)
         nas_encrypted = nas_encrypt(dic)
         dic['NAS-ENC'] = nas_encrypted 
         mac_bytes = nas_hash(dic)
@@ -1487,7 +1508,7 @@ def ProcessDownlinkNAS(dic):
         dic['STATE'] = 1
         
     elif message_type == 69: #detach request
-    
+        bearer_event_publisher.remove_session(dic)
         if len(dic['SGW-GTP-ADDRESS']) > 0:
             #os.write(dic['PIPE-OUT-GTPU-ENCAPSULATE'],b'\x02' + dic['SGW-GTP-ADDRESS'][-1] + dic['SGW-TEID'][-1])
             #os.write(dic['PIPE-OUT-GTPU-DECAPSULATE'],b'\x02' + dic['SGW-GTP-ADDRESS'][-1] + b'\x00\x00\x00' + bytes([dic['RAB-ID'][-1]]))
@@ -1496,6 +1517,7 @@ def ProcessDownlinkNAS(dic):
         dic['RAB-ID'] = []
         dic['SGW-GTP-ADDRESS'] = []
         dic['SGW-TEID'] = []
+        dic['ENB-TEID'] = []
         dic['EPS-BEARER-IDENTITY'] = []
         dic['EPS-BEARER-TYPE'] = []  # default 0, dedicated 1
         dic['EPS-BEARER-STATE']  = [] # active 1, inactive 0
@@ -1516,6 +1538,7 @@ def ProcessDownlinkNAS(dic):
         dic = eMENU.print_log(dic, "NAS: sending DetachAccept")
 
     elif message_type == 70: #detach accept
+        bearer_event_publisher.remove_session(dic)
         if len(dic['SGW-GTP-ADDRESS']) > 0:
             #os.write(dic['PIPE-OUT-GTPU-ENCAPSULATE'],b'\x02' + dic['SGW-GTP-ADDRESS'][-1] + dic['SGW-TEID'][-1])
             #os.write(dic['PIPE-OUT-GTPU-DECAPSULATE'],b'\x02' + dic['SGW-GTP-ADDRESS'][-1] + b'\x00\x00\x00' + bytes([dic['RAB-ID'][-1]]))
@@ -1526,6 +1549,7 @@ def ProcessDownlinkNAS(dic):
         dic['RAB-ID'] = []
         dic['SGW-GTP-ADDRESS'] = []
         dic['SGW-TEID'] = []
+        dic['ENB-TEID'] = []
         dic['EPS-BEARER-IDENTITY'] = []
         dic['EPS-BEARER-TYPE'] = []  # default 0, dedicated 1
         dic['EPS-BEARER-STATE']  = [] # active 1, inactive 0
@@ -1535,11 +1559,11 @@ def ProcessDownlinkNAS(dic):
         global user_dict
         if dic['IMSI'] in user_dict:
             gtp_key = dic.get('GTP-KEY')
-            if gtp_key in gtp_dict:
+            if not external_gtpu and gtp_key in gtp_dict:
                 del gtp_dict[gtp_key]
             del user_dict[dic['IMSI']]
             ue_pair = dic.get('UE-NAMESPACE')
-            if isinstance(ue_pair, (list, tuple)) and len(ue_pair) == 2:
+            if not external_gtpu and isinstance(ue_pair, (list, tuple)) and len(ue_pair) == 2:
                 ue_eth_pair(tuple(ue_pair))
                 delete_ns(dic['IMSI'],ue_pair[1])
             
@@ -1995,12 +2019,7 @@ def ProcessInitialContextSetupRequest(IEs, dic):
                 first_eRAB = eRAB_list[m]['value'][1]
                 e_RAB_id = first_eRAB['e-RAB-ID']
                 
-                if e_RAB_id not in dic['RAB-ID']:
-                    dic['RAB-ID'].append(e_RAB_id)
-                    dic['SGW-GTP-ADDRESS'].append(None)
-                    dic['SGW-TEID'].append(None)
-                    
-                position = dic['RAB-ID'].index(e_RAB_id)                
+                position = ensure_bearer_slot(dic, e_RAB_id)
                 dic['SGW-GTP-ADDRESS'][position] = (first_eRAB['transportLayerAddress'][0]).to_bytes(4, byteorder='big')
                 dic['SGW-TEID'][position] = first_eRAB['gTP-TEID']
                 if 'nAS-PDU' in first_eRAB:
@@ -2014,8 +2033,7 @@ def ProcessInitialContextSetupRequest(IEs, dic):
             if len(dic['SGW-GTP-ADDRESS']) > 0:
                 #os.write(dic['PIPE-OUT-GTPU-ENCAPSULATE'],dic['GTP-U'] + dic['SGW-GTP-ADDRESS'][-1] + dic['SGW-TEID'][-1])
                 #os.write(dic['PIPE-OUT-GTPU-DECAPSULATE'],dic['GTP-U'] + dic['SGW-GTP-ADDRESS'][-1] + b'\x00\x00\x00' + bytes([dic['RAB-ID'][-1]])) 
-                global gtp_dict 
-                gtp_dict[dic['GTP-KEY']] =((dic['SGW-TEID'])[-1],(dic['SGW-GTP-ADDRESS'])[-1])      
+                sync_internal_gtp(dic)
                 
 
         
@@ -2027,7 +2045,8 @@ def ProcessInitialContextSetupRequest(IEs, dic):
     IEs_RABs_List = []
     for m in range(Num_eRAB):
         e_RAB_id = eRAB_list[m]['value'][1]['e-RAB-ID']
-        IEs_RAB = {'id': 50, 'value': ('E-RABSetupItemCtxtSURes', {'e-RAB-ID': e_RAB_id, 'transportLayerAddress': (dic['ENB-GTP-ADDRESS-INT'], 32), 'gTP-TEID': (struct.pack('>I', upteid_get()))[1:] + bytes([e_RAB_id]) }), 'criticality': 'ignore'}
+        position = dic['RAB-ID'].index(e_RAB_id)
+        IEs_RAB = {'id': 50, 'value': ('E-RABSetupItemCtxtSURes', {'e-RAB-ID': e_RAB_id, 'transportLayerAddress': (dic['ENB-GTP-ADDRESS-INT'], 32), 'gTP-TEID': dic['ENB-TEID'][position] }), 'criticality': 'ignore'}
         IEs_RABs_List.append(IEs_RAB)
         
     IEs.append({'id': 51, 'value': ('E-RABSetupListCtxtSURes', IEs_RABs_List), 'criticality': 'ignore'})   
@@ -2059,6 +2078,8 @@ def ProcessInitialContextSetupRequest(IEs, dic):
             val.append(('initiatingMessage', {'procedureCode': 13, 'value': ('UplinkNASTransport', {'protocolIEs': IEs}), 'criticality': 'ignore'}))
       
             dic = eMENU.print_log(dic, "S1AP: sending UplinkNASTransport")
+
+    bearer_event_publisher.sync(dic)
             
             
     if dic['UECONTEXTRELEASE-CSFB'] == True:            
@@ -2084,12 +2105,7 @@ def ProcessERABSetupRequest(IEs, dic):
                 first_eRAB = eRAB_list[m]['value'][1]
                 e_RAB_id = first_eRAB['e-RAB-ID']
                 
-                if e_RAB_id not in dic['RAB-ID']:
-                    dic['RAB-ID'].append(e_RAB_id)
-                    dic['SGW-GTP-ADDRESS'].append(None)
-                    dic['SGW-TEID'].append(None)
-     
-                position = dic['RAB-ID'].index(e_RAB_id)
+                position = ensure_bearer_slot(dic, e_RAB_id)
                                         
                 dic['SGW-GTP-ADDRESS'][position] = (first_eRAB['transportLayerAddress'][0]).to_bytes(4, byteorder='big')
                 dic['SGW-TEID'][position] = first_eRAB['gTP-TEID']
@@ -2113,7 +2129,8 @@ def ProcessERABSetupRequest(IEs, dic):
     IEs_RABs_List = []
     for m in range(Num_eRAB):
         e_RAB_id = eRAB_list[m]['value'][1]['e-RAB-ID']
-        IEs_RAB = {'id': 39, 'value': ('E-RABSetupItemBearerSURes', {'e-RAB-ID': e_RAB_id, 'transportLayerAddress': (dic['ENB-GTP-ADDRESS-INT'], 32), 'gTP-TEID': b'\x00\x00\x00' + bytes([e_RAB_id]) }), 'criticality': 'ignore'}
+        position = dic['RAB-ID'].index(e_RAB_id)
+        IEs_RAB = {'id': 39, 'value': ('E-RABSetupItemBearerSURes', {'e-RAB-ID': e_RAB_id, 'transportLayerAddress': (dic['ENB-GTP-ADDRESS-INT'], 32), 'gTP-TEID': dic['ENB-TEID'][position] }), 'criticality': 'ignore'}
         IEs_RABs_List.append(IEs_RAB)
         
     IEs.append({'id': 28, 'value': ('E-RABSetupListBearerSURes', IEs_RABs_List), 'criticality': 'ignore'})   
@@ -2150,6 +2167,8 @@ def ProcessERABSetupRequest(IEs, dic):
             dic = eMENU.print_log(dic, "S1AP: sending UplinkNASTransport")
        
         
+    sync_internal_gtp(dic)
+    bearer_event_publisher.sync(dic)
     return val, dic
 
 
@@ -2167,10 +2186,11 @@ def ProcessERABReleaseCommand(IEs, dic):
                 e_RAB_id = first_eRAB['e-RAB-ID']
                 
                 if e_RAB_id in dic['RAB-ID']:
-                    position = dic['EPS-BEARER-IDENTITY'].index(e_RAB_id)
+                    position = dic['RAB-ID'].index(e_RAB_id)
                     dic['RAB-ID'].pop(position)
                     dic['SGW-GTP-ADDRESS'].pop(position)
                     dic['SGW-TEID'].pop(position)
+                    dic['ENB-TEID'].pop(position)
             
             if len(dic['SGW-GTP-ADDRESS']) > 0:
                 #os.write(dic['PIPE-OUT-GTPU-ENCAPSULATE'],dic['GTP-U'] + dic['SGW-GTP-ADDRESS'][-1] + dic['SGW-TEID'][-1])
@@ -2210,6 +2230,7 @@ def ProcessERABReleaseCommand(IEs, dic):
         val2 = ('initiatingMessage', {'procedureCode': 13, 'value': ('UplinkNASTransport', {'protocolIEs': IEs}), 'criticality': 'ignore'})    
       
         dic = eMENU.print_log(dic, "S1AP: sending UplinkNASTransport")
+    bearer_event_publisher.sync(dic)
     return [val, val2] , dic
 
 
@@ -2254,6 +2275,7 @@ def ProcessUEContextReleaseCommand(rec_dic,IEs, dic):
     if dic['UECONTEXTRELEASE-CSFB'] == True:
         dic['UECONTEXTRELEASE-CSFB'] = False
         
+    bearer_event_publisher.remove_session(dic)
     return val, dic
 
 
@@ -2335,7 +2357,7 @@ def UEContextReleaseRequest(dic):
         #os.write(dic['PIPE-OUT-GTPU-DECAPSULATE'],b'\x02' + dic['SGW-GTP-ADDRESS'][-1] + b'\x00\x00\x00' + bytes([dic['RAB-ID'][-1]]))
         pass
     dic = eMENU.print_log(dic, "GTP-U: Deactivation due to ContextRelease")
-        
+    bearer_event_publisher.remove_session(dic)
     return val
 
 
@@ -2348,7 +2370,7 @@ def ERABModificationIndication(dic):
     RABList = []
     
     for i in range(len(dic['RAB-ID'])):
-        RABList.append({'id': 200, 'value': ('E-RABToBeModifiedItemBearerModInd', {'e-RAB-ID': dic['RAB-ID'][i], 'transportLayerAddress': (dic['ENB-GTP-ADDRESS-INT'], 32), 'dL-GTP-TEID': b'\x00\x00\x00' + bytes([dic['RAB-ID'][i]]) }), 'criticality': 'ignore'})
+        RABList.append({'id': 200, 'value': ('E-RABToBeModifiedItemBearerModInd', {'e-RAB-ID': dic['RAB-ID'][i], 'transportLayerAddress': (dic['ENB-GTP-ADDRESS-INT'], 32), 'dL-GTP-TEID': dic['ENB-TEID'][i] }), 'criticality': 'ignore'})
     IEs.append({'id': 199, 'value': ('E-RABToBeModifiedListBearerModInd', RABList), 'criticality': 'reject'})
 
 
@@ -2657,17 +2679,29 @@ if __name__ == "__main__":
     parser = OptionParser()
     parser.add_option("-i", "--ip", dest="eNB_ip", help="eNB Local IP Address")
     parser.add_option("-m", "--mme", dest="mme_ip", help="MME IP Address")
+    parser.add_option("--gtpu-ip", dest="gtpu_ip",
+                      help="GTP-U address advertised to the MME (defaults to --ip)")
+    parser.add_option("--external-gtpu", action="store_true", default=False,
+                      help="disable the built-in GTP-U and Linux namespace data plane")
+    parser.add_option("--bearer-events", dest="bearer_events",
+                      help="JSONL path or unix:/path.sock for bearer lifecycle events")
     (options, args) = parser.parse_args()
     if options.eNB_ip is None or options.mme_ip is None:
         parser.error('--ip and --mme are required')
     try:
-        ipaddress.ip_address(options.eNB_ip)
-        ipaddress.ip_address(options.mme_ip)
+        ipaddress.IPv4Address(options.eNB_ip)
+        ipaddress.IPv4Address(options.mme_ip)
+        options.gtpu_ip = options.gtpu_ip or options.eNB_ip
+        ipaddress.IPv4Address(options.gtpu_ip)
     except ValueError as error:
         parser.error(str(error))
+    external_gtpu = options.external_gtpu
+    bearer_event_publisher = BearerEventPublisher(options.bearer_events)
+    atexit.register(bearer_event_publisher.close)
     options.serial_interface="/dev/ttyUSB2"
     sys_queue="/foo"
-    bridge_up()
+    if not external_gtpu:
+        bridge_up()
     server_address = (options.mme_ip, 36412)
 
     #socket options
@@ -2696,29 +2730,33 @@ if __name__ == "__main__":
     #session_dict['ENB-GTP-ADDRESS-INT'] = ip2int(options.eNB_ip)
     #session_dict['ENB-GTP-ADDRESS'] = socket.inet_aton(options.eNB_ip)
     session_dict=UserDict()
-    s_gtpu = runtime_resources.add(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
-    s_gtpu.bind((options.eNB_ip, 2152))
-    pipe_in_gtpu_encapsulate, pipe_out_gtpu_encapsulate = os.pipe()
-    pipe_in_gtpu_decapsulate, pipe_out_gtpu_decapsulate = os.pipe()
-    for pipe_fd in (
-            pipe_in_gtpu_encapsulate,
-            pipe_out_gtpu_encapsulate,
-            pipe_in_gtpu_decapsulate,
-            pipe_out_gtpu_decapsulate):
-        runtime_resources.add_fd(pipe_fd)
+    pipe_out_gtpu_encapsulate = None
+    pipe_out_gtpu_decapsulate = None
+    if not external_gtpu:
+        s_gtpu = runtime_resources.add(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
+        s_gtpu.bind((options.gtpu_ip, 2152))
+        pipe_in_gtpu_encapsulate, pipe_out_gtpu_encapsulate = os.pipe()
+        pipe_in_gtpu_decapsulate, pipe_out_gtpu_decapsulate = os.pipe()
+        for pipe_fd in (
+                pipe_in_gtpu_encapsulate,
+                pipe_out_gtpu_encapsulate,
+                pipe_in_gtpu_decapsulate,
+                pipe_out_gtpu_decapsulate):
+            runtime_resources.add_fd(pipe_fd)
     session_dict['PIPE-OUT-GTPU-ENCAPSULATE'] = pipe_out_gtpu_encapsulate
     session_dict['PIPE-OUT-GTPU-DECAPSULATE'] = pipe_out_gtpu_decapsulate
     session_dict['GTP-U'] = b'\x02' # inactive
-    ul_gtp = runtime_resources.add(
-        socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
-    )
-    ul_gtp.bind((bridge_name,0)) 
-    worker1 = Thread(target = encapsulate_gtp_u, args = (s_gtpu,ul_gtp,))
-    worker2 = Thread(target = decapsulate_gtp_u, args = (s_gtpu,ul_gtp,))
-    worker1.setDaemon(True)
-    worker2.setDaemon(True)
-    worker1.start()
-    worker2.start()
+    if not external_gtpu:
+        ul_gtp = runtime_resources.add(
+            socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+        )
+        ul_gtp.bind((bridge_name,0))
+        worker1 = Thread(target=encapsulate_gtp_u, args=(s_gtpu, ul_gtp,))
+        worker2 = Thread(target=decapsulate_gtp_u, args=(s_gtpu, ul_gtp,))
+        worker1.daemon = True
+        worker2.daemon = True
+        worker1.start()
+        worker2.start()
 
     try:
         client.connect(server_address)
@@ -2817,11 +2855,12 @@ if __name__ == "__main__":
                                 logging.info(f'imsi {queue_msg} found in object')
                                 session_dict = user_dict[queue_msg['imsi']]
                                 if queue_msg['procedure'] == 'attach':
+                                    bearer_event_publisher.remove_session(session_dict)
                                     gtp_key = session_dict.get('GTP-KEY')
-                                    if gtp_key in gtp_dict:
+                                    if not external_gtpu and gtp_key in gtp_dict:
                                         del gtp_dict[gtp_key]
                                     ue_pair = session_dict.get('UE-NAMESPACE')
-                                    if isinstance(ue_pair, (list, tuple)) and len(ue_pair) == 2:
+                                    if not external_gtpu and isinstance(ue_pair, (list, tuple)) and len(ue_pair) == 2:
                                         network_runtime.delete_ue_namespace(session_dict['IMSI'])
                                         ue_eth_pair(tuple(ue_pair))
                                         session_dict['UE-NAMESPACE'] = None
@@ -2849,6 +2888,7 @@ if __name__ == "__main__":
                                 session_dict['RAB-ID']=[]
                                 session_dict['SGW-GTP-ADDRESS']=[]
                                 session_dict['SGW-TEID']=[]
+                                session_dict['ENB-TEID']=[]
                                 session_dict['EPS-BEARER-IDENTITY']=[]
                                 session_dict['EPS-BEARER-TYPE']=[]  # default 0, dedicated 1
                                 session_dict['EPS-BEARER-STATE']=[] # active 1, inactive 0
@@ -2865,7 +2905,7 @@ if __name__ == "__main__":
                                 session_dict['NAS-KEY-EIA1']=return_key(session_dict['KASME'],1,'NAS-INT')
                                 session_dict['NAS-KEY-EIA2']=return_key(session_dict['KASME'],2,'NAS-INT')
                                 session_dict['NAS-KEY-EIA3']=return_key(session_dict['KASME'],3,'NAS-INT')
-                                session_dict['ENB-GTP-ADDRESS-INT']=ip2int(options.eNB_ip)
+                                session_dict['ENB-GTP-ADDRESS-INT']=ip2int(options.gtpu_ip)
                                 session_dict['PIPE-OUT-GTPU-ENCAPSULATE'] = pipe_out_gtpu_encapsulate
                                 session_dict['PIPE-OUT-GTPU-DECAPSULATE'] = pipe_out_gtpu_decapsulate
                                 session_dict['GTP-U'] = b'\x02'
