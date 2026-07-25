@@ -102,6 +102,31 @@ In terms of procedures, the application supports the following ones:
 - Activate/Deactivate GTP-U for Control Plane
 - Activate/Deactivate Data over NAS
 - Set/Send Non-IP Packet
+
+## Signaling load test
+
+`load_test.py` queues Attach requests at a controlled rate and measures each
+subscriber from enqueue time until the simulator writes `CONNECTED` or
+`FAILED`. Subscribers that do not reach a terminal state within the configured
+timeout are reported as `TIMEOUT`.
+
+Prepare a CSV with the columns shown in `subscribers.example.csv`, start the
+simulator, complete S1 setup, and run:
+
+```
+python3 load_test.py --subscribers subscribers.example.csv --attach-rate 10 \
+  --timeout 30 --hold-seconds 60 --detach --detach-rate 20 \
+  --report load-test-report.json
+```
+
+The JSON report contains totals, success rate, requested and achieved load,
+test duration, per-subscriber outcomes, and Attach latency
+min/P50/P95/P99/max values. Status timestamps are checked so results left by an
+earlier run are ignored.
+
+This runner measures signaling load through the simulator's existing single
+SCTP association. It does not generate user-plane traffic or emulate multiple
+eNB SCTP associations.
  
 
 

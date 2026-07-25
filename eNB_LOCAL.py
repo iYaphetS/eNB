@@ -28,6 +28,7 @@ from kamene.all import Raw
 from kamene.all import send 
 import multiprocessing
 import eNAS, eMENU
+from session_index import SessionIndex, extract_enb_ue_s1ap_id, sync_session_index
 os.system("mkdir -p /var/log/sim/")
 logging.basicConfig(filename="/var/log/sim/tool.log",filemode='w',format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S',level=logging.DEBUG)
 logger = logging.getLogger('edge_log')
@@ -2624,6 +2625,7 @@ if __name__ == "__main__":
     bridge_name="brlo"  
     user_dict = {}
     gtp_dict = {}
+    session_index = SessionIndex()
     enb_s1ap_id = 1
     parser = OptionParser()
     parser.add_option("-i", "--ip", dest="eNB_ip", help="eNB Local IP Address")
@@ -2697,25 +2699,34 @@ if __name__ == "__main__":
                 buffer = client.recv(4096)
                 PDU.from_aper(buffer)
                 (type, pdu_dict) = PDU()
-                for initial_dic in pdu_dict['value']:
-                    if 'protocolIEs' in initial_dic:
-                        for final_dic in  initial_dic['protocolIEs']:
-                            if 'id' in final_dic and final_dic['id'] == 8:
-                                for user_key, user_value in user_dict.items():
-                                    if final_dic['value'][1] == user_value['ENB-UE-S1AP-ID']:
-                                        session_dict=user_dict[user_key]
-                                        break
+                enb_ue_s1ap_id = extract_enb_ue_s1ap_id(pdu_dict)
+                if enb_ue_s1ap_id is not None:
+                    indexed_session = session_index.by_enb_id(enb_ue_s1ap_id)
+                    if indexed_session is None:
+                        logging.warning(
+                            f"S1AP: dropping message for unknown ENB-UE-S1AP-ID {enb_ue_s1ap_id}"
+                        )
+                        continue
+                    session_dict = indexed_session
+                drop_pdu = False
                 if  pdu_dict['value'][0] == 'Paging':                   
                     for i in pdu_dict['value'][1]['protocolIEs']:
                         if i['id'] == 43:
                             if i['value'][1][0] == 's-TMSI':
                                 MME_CODE = i['value'][1][1]['mMEC']
                                 M_TMSI = i['value'][1][1]['m-TMSI']
-                                for user_key, user_value in user_dict.items():
-                                    if user_value['S-TMSI'] == MME_CODE + M_TMSI:
-                                        session_dict=user_dict[user_key]
+                                indexed_session = session_index.by_s_tmsi(MME_CODE + M_TMSI)
+                                if indexed_session is None:
+                                    logging.warning("S1AP: dropping Paging for unknown S-TMSI")
+                                    drop_pdu = True
+                                    break
+                                session_dict = indexed_session
+
+                if drop_pdu:
+                    continue
 
                 PDU, client, session_dict = ProcessS1AP(type, pdu_dict, client, session_dict)
+                sync_session_index(session_index, user_dict, session_dict)
             elif sock == send_fd:
                   if q.qsize()>0: 
                     queue_msg=q.get()
@@ -2802,18 +2813,14 @@ if __name__ == "__main__":
                         logging.info(f"{msg} {session_dict['IMSI']} no if active user in tool {len(user_dict)} no of gtp tunnel {len(gtp_dict)}")
                     else:
                         logging.info(f"{msg} no if active user in tool {len(user_dict)} no of gtp tunnel {len(gtp_dict)}")
-                    used_enb_s1ap_ids = {
-                        user['ENB-UE-S1AP-ID']
-                        for user in user_dict.values()
-                        if user is not session_dict
-                    }
                     PDU, client, session_dict = eMENU.ProcessMenu(
                         PDU,
                         client,
                         session_dict,
                         msg,
-                        used_enb_s1ap_ids,
+                        session_index.used_enb_ids(),
                     )
+                    sync_session_index(session_index, user_dict, session_dict)
     client.close()
 
 
