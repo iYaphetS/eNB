@@ -2802,7 +2802,18 @@ if __name__ == "__main__":
                         logging.info(f"{msg} {session_dict['IMSI']} no if active user in tool {len(user_dict)} no of gtp tunnel {len(gtp_dict)}")
                     else:
                         logging.info(f"{msg} no if active user in tool {len(user_dict)} no of gtp tunnel {len(gtp_dict)}")
-                    PDU, client, session_dict = eMENU.ProcessMenu(PDU, client, session_dict, msg)
+                    used_enb_s1ap_ids = {
+                        user['ENB-UE-S1AP-ID']
+                        for user in user_dict.values()
+                        if user is not session_dict
+                    }
+                    PDU, client, session_dict = eMENU.ProcessMenu(
+                        PDU,
+                        client,
+                        session_dict,
+                        msg,
+                        used_enb_s1ap_ids,
+                    )
     client.close()
 
 

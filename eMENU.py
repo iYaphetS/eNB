@@ -1,8 +1,9 @@
 # Import the modules needed to run the script.
 import sys, os
 import datetime
-from eNB_LOCAL import * 
-import logging 
+from eNB_LOCAL import *
+from enb_id_allocator import allocate_enb_ue_s1ap_id
+import logging
 # Main definition - constants
 menu_actions  = {}  
 
@@ -21,11 +22,12 @@ logging.info(" ********************* tool started ***************")
 # =======================
  
 # Main menu
-def dynamic_variable():
+def dynamic_variable(used_enb_s1ap_ids=None):
     global enb_s1ap_id
-    enb_s1ap_id +=1
-    if enb_s1ap_id == 10000:
-        enb_s1ap_id = 1
+    enb_s1ap_id = allocate_enb_ue_s1ap_id(
+        enb_s1ap_id,
+        used_enb_s1ap_ids or (),
+    )
     var_dic= {'enb_s1ap_id':enb_s1ap_id}
     return var_dic
 menu_list = [ '  0. Show current settings',     \
@@ -115,7 +117,7 @@ def print_menu(log):
         
 
 
-def ProcessMenu(PDU, client, session_dict, msg):
+def ProcessMenu(PDU, client, session_dict, msg, used_enb_s1ap_ids=None):
     global enb_s1ap_id
     if msg == "Q\n" or msg == "q\n": 
         os.system('clear')
@@ -365,7 +367,7 @@ def ProcessMenu(PDU, client, session_dict, msg):
             session_dict['SQN'] = 0
             session_dict['MME-UE-S1AP-ID-OLD'] = session_dict['MME-UE-S1AP-ID']
             session_dict['ENB-UE-S1AP-ID-OLD'] = session_dict['ENB-UE-S1AP-ID']
-            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable()['enb_s1ap_id']
+            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable(used_enb_s1ap_ids)['enb_s1ap_id']
             PDU.set_val(InitialUEMessage(session_dict))
             message = PDU.to_aper()
             client = set_stream(client, 1)
@@ -391,7 +393,7 @@ def ProcessMenu(PDU, client, session_dict, msg):
         
     elif msg == "tau":
         if session_dict['STATE'] >1: 
-            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable()['enb_s1ap_id']
+            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable(used_enb_s1ap_ids)['enb_s1ap_id']
             session_dict = ProcessUplinkNAS('tracking area update request', session_dict)
             PDU.set_val(InitialUEMessage(session_dict))
             message = PDU.to_aper()  
@@ -401,7 +403,7 @@ def ProcessMenu(PDU, client, session_dict, msg):
             
     elif msg == "tau-p": 
         if session_dict['STATE'] >1:
-            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable()['enb_s1ap_id']
+            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable(used_enb_s1ap_ids)['enb_s1ap_id']
             session_dict = ProcessUplinkNAS('tracking area update request periodic', session_dict)
             PDU.set_val(InitialUEMessage(session_dict))
             message = PDU.to_aper()  
@@ -412,7 +414,7 @@ def ProcessMenu(PDU, client, session_dict, msg):
 
     elif msg == "service-request":
         if session_dict['STATE'] >1:
-            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable()['enb_s1ap_id']
+            session_dict['ENB-UE-S1AP-ID'] = dynamic_variable(used_enb_s1ap_ids)['enb_s1ap_id']
             session_dict = ProcessUplinkNAS('service request', session_dict)
             PDU.set_val(InitialUEMessage(session_dict))
             message = PDU.to_aper()    
