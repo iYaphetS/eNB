@@ -22,6 +22,8 @@ import subprocess
 from threading import Thread
 import datetime
 import logging
+import atexit
+import ipaddress
 from kamene.all import IP
 from kamene.all import UDP 
 from kamene.all import Raw
@@ -30,10 +32,16 @@ import multiprocessing
 import eNAS, eMENU
 from session_index import SessionIndex, extract_enb_ue_s1ap_id, sync_session_index
 from load_result_channel import LoadResultPublisher
-os.system("mkdir -p /var/log/sim/")
+from network_runtime import NetworkRuntime
+from command_validation import validate_command
+from resource_registry import ResourceRegistry
+os.makedirs('/var/log/sim', exist_ok=True)
 logging.basicConfig(filename="/var/log/sim/tool.log",filemode='w',format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S',level=logging.DEBUG)
 logger = logging.getLogger('edge_log')
 load_result_publisher = LoadResultPublisher()
+network_runtime = NetworkRuntime()
+runtime_resources = ResourceRegistry()
+atexit.register(runtime_resources.close)
 
 
 def report_ue_status(session, status):
@@ -43,6 +51,33 @@ def report_ue_status(session, status):
     except OSError as error:
         logging.warning(f"Unable to write UE status: {error}")
     load_result_publisher.publish(session, status)
+
+
+def report_enb_status(status):
+    try:
+        with open('/var/log/sim/enb_status', 'w') as status_file:
+            status_file.write(status)
+    except OSError as error:
+        logging.warning(f"Unable to write eNB status: {error}")
+
+
+def configure_tun_ipv6(current_address, new_address, tun_number):
+    tun_number = int(tun_number)
+    if not 0 <= tun_number <= 255:
+        raise ValueError('TUN number must be between 0 and 255')
+    tun_name = f'tun{tun_number}'
+    if current_address is not None:
+        current_address = str(ipaddress.IPv6Address(current_address))
+        subprocess.run(
+            ['ip', '-6', 'addr', 'del', f'{current_address}/64', 'dev', tun_name],
+            check=False,
+        )
+    new_address = str(ipaddress.IPv6Address(new_address))
+    subprocess.run(
+        ['ip', '-6', 'addr', 'replace', f'{new_address}/64', 'dev', tun_name],
+        check=False,
+    )
+    return new_address
 
 
 #tries to import all options for retrieving IMSI, and RES, CK and IK from USIM.
@@ -133,47 +168,23 @@ NON_IP_PACKET_4 = '0102030405060708090a0102030405060708090a0102030405060708090a0
 ######################################################################################################################################
 
 def add_ns(ns_name,veth,nseth,ue_ip):
-    sys_ns=os.popen("ip netns show").read()
-    if ns_name in sys_ns:
-        os.popen(f"ip netns del {ns_name}")
-    os.popen(f"ip netns add {ns_name}")
-    veth_ns=os.popen(f"ip link show type veth").read()
-    if veth in veth_ns:
-        os.popen(f"ip link del {veth}")
-    os.popen(f"ip link add {veth} type veth peer name {nseth}")
-    veth_exists=os.popen("ip link show type veth").read()
-    if veth in veth_exists and nseth in veth_exists:
-        logging.info("veth added successfully")
-    os.system(f"ip link set {nseth} netns {ns_name}")
-    os.system(f"ip netns exec {ns_name} ifconfig {nseth} {ue_ip}/24 up")
-    os.system(f"ip link set dev {veth} master {bridge_name}")
-    os.system(f"ip link set dev {veth} up")
-    os.system(f"ip netns exec {ns_name} ip  link set  lo up")
-    try:
-        br_ip_list=[n['addr'] for n in netifaces.ifaddresses(bridge_name)[2] ]
-    except:
-        br_ip_list=[]
-    subnet=re.findall(r"[\d]*.[\d]*.[\d]*.",ue_ip)[0]
-    if f"{subnet}1" not in br_ip_list:
-        os.popen(f"ip addr add {subnet}1/24 dev {bridge_name}")
-    os.popen(f"ip netns exec {ns_name} ip route add default via {subnet}1 dev {nseth}")
+    network_runtime.setup_ue_namespace(ns_name, veth, nseth, ue_ip, bridge_name)
 
 def delete_ns(ns_name,veth):
-    sys_ns=os.popen("ip netns show").read()
-    if ns_name in sys_ns:
-        os.popen(f"ip netns del {ns_name}")
+    network_runtime.delete_ue_namespace(ns_name)
 
 def bridge_up():
-    os.system(f"ip link del {bridge_name} ")
-    os.system(f"ip link add {bridge_name} type bridge")
-    os.system(f"ip link set dev {bridge_name} up")
+    network_runtime.ensure_bridge(bridge_name)
 
 def ue_eth_pair(ue_pair_val=None):
     global ue_eth
     if ue_pair_val is None:
+        if not ue_eth:
+            raise RuntimeError('No free UE veth pairs are available')
         return ue_eth.pop(0)
     else:
-        ue_eth.append(ue_pair_val)
+        if ue_pair_val not in ue_eth:
+            ue_eth.append(ue_pair_val)
 
 def upteid_get():
     global upteid
@@ -1430,10 +1441,11 @@ def ProcessDownlinkNAS(dic):
        
                             elif x[0] == 'ipv6':
                                  #operating system will process Router Advertisement
-                                if dic['PDN-ADDRESS-IPV6'] is not None:                                  
-                                    subprocess.call("ip -6 addr del " + dic['PDN-ADDRESS-IPV6'] + "/64 dev tun" + str(dic['SESSION-TYPE-TUN']), shell=True)
-                                dic['PDN-ADDRESS-IPV6'] = x[1]                   
-                                subprocess.call("ip -6 addr add " + x[1] + "/64 dev tun" + str(dic['SESSION-TYPE-TUN']), shell=True)
+                                dic['PDN-ADDRESS-IPV6'] = configure_tun_ipv6(
+                                    dic['PDN-ADDRESS-IPV6'],
+                                    x[1],
+                                    dic['SESSION-TYPE-TUN'],
+                                )
                             
                     elif m[0] == 'access point name':
                         
@@ -1522,10 +1534,14 @@ def ProcessDownlinkNAS(dic):
         dic['STATE'] = 1
         global user_dict
         if dic['IMSI'] in user_dict:
-            del gtp_dict[dic['GTP-KEY']]
+            gtp_key = dic.get('GTP-KEY')
+            if gtp_key in gtp_dict:
+                del gtp_dict[gtp_key]
             del user_dict[dic['IMSI']]
-            ue_eth_pair(dic['UE-NAMESPACE'])
-            delete_ns(dic['IMSI'],dic['UE-NAMESPACE'][1])
+            ue_pair = dic.get('UE-NAMESPACE')
+            if isinstance(ue_pair, (list, tuple)) and len(ue_pair) == 2:
+                ue_eth_pair(tuple(ue_pair))
+                delete_ns(dic['IMSI'],ue_pair[1])
             
 
     elif message_type == 73: #tracking area update accept
@@ -1716,10 +1732,11 @@ def ProcessDownlinkNAS(dic):
                         #subprocess.call("ip addr add " + x[1] + "/32 dev tun" + str(dic['SESSION-TYPE-TUN']), shell=True)
                     elif x[0] == 'ipv6':
                         # operationg system will process Router Advertisment sent by PGW
-                        if dic['PDN-ADDRESS-IPV6'] is not None:
-                            subprocess.call("ip -6 addr del " + dic['PDN-ADDRESS-IPV6'] + "/64 dev tun" + str(dic['SESSION-TYPE-TUN']), shell=True)
-                        dic['PDN-ADDRESS-IPV6'] = x[1]
-                        subprocess.call("ip -6 addr add " + x[1] + "/64 dev tun" + str(dic['SESSION-TYPE-TUN']), shell=True)                            
+                        dic['PDN-ADDRESS-IPV6'] = configure_tun_ipv6(
+                            dic['PDN-ADDRESS-IPV6'],
+                            x[1],
+                            dic['SESSION-TYPE-TUN'],
+                        )
                 
 
             elif i[0] == 'access point name':
@@ -2524,10 +2541,10 @@ def open_tun(n):
         f = os.open("/dev/net/tun", os.O_RDWR)
         ifs = fcntl.ioctl(f, TUNSETIFF, struct.pack("16sH", bytes("tun%d" % n, "utf-8"), TUNMODE))
         #ifname = ifs[:16].strip("\x00")
-        subprocess.call("ifconfig tun%d up" % n, shell=True)
+        subprocess.run(['ip', 'link', 'set', f'tun{n}', 'up'], check=False)
     elif sys.platform == "darwin":
         f = os.open("/dev/tun" + str(n), os.O_RDWR)
-        subprocess.call("ifconfig tun" + str(n) + " up", shell=True)
+        subprocess.run(['ifconfig', f'tun{n}', 'up'], check=False)
 	   
     return f
 
@@ -2630,7 +2647,6 @@ class UserDict(dict):
 ######################################################################################################################################
 ######################################################################################################################################
 if __name__ == "__main__":
-    os.system("ip netns show |awk {'print $1'}|xargs -I {} ip netns del {}")
     ue_eth=[(f"veth{n}",f"neth{n}") for n in range(1000)]
     upteid=1
     bridge_name="brlo"  
@@ -2642,14 +2658,22 @@ if __name__ == "__main__":
     parser.add_option("-i", "--ip", dest="eNB_ip", help="eNB Local IP Address")
     parser.add_option("-m", "--mme", dest="mme_ip", help="MME IP Address")
     (options, args) = parser.parse_args()
+    if options.eNB_ip is None or options.mme_ip is None:
+        parser.error('--ip and --mme are required')
+    try:
+        ipaddress.ip_address(options.eNB_ip)
+        ipaddress.ip_address(options.mme_ip)
+    except ValueError as error:
+        parser.error(str(error))
     options.serial_interface="/dev/ttyUSB2"
     sys_queue="/foo"
-    tmp_file="/tmp/foo"
     bridge_up()
     server_address = (options.mme_ip, 36412)
 
     #socket options
-    client = socket.socket(socket.AF_INET,socket.SOCK_STREAM,socket.IPPROTO_SCTP)
+    client = runtime_resources.add(
+        socket.socket(socket.AF_INET,socket.SOCK_STREAM,socket.IPPROTO_SCTP)
+    )
     client.settimeout(5)
     try:
        client.bind((options.eNB_ip, 0))
@@ -2672,14 +2696,22 @@ if __name__ == "__main__":
     #session_dict['ENB-GTP-ADDRESS-INT'] = ip2int(options.eNB_ip)
     #session_dict['ENB-GTP-ADDRESS'] = socket.inet_aton(options.eNB_ip)
     session_dict=UserDict()
-    s_gtpu = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s_gtpu = runtime_resources.add(socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
     s_gtpu.bind((options.eNB_ip, 2152))
     pipe_in_gtpu_encapsulate, pipe_out_gtpu_encapsulate = os.pipe()
     pipe_in_gtpu_decapsulate, pipe_out_gtpu_decapsulate = os.pipe()
+    for pipe_fd in (
+            pipe_in_gtpu_encapsulate,
+            pipe_out_gtpu_encapsulate,
+            pipe_in_gtpu_decapsulate,
+            pipe_out_gtpu_decapsulate):
+        runtime_resources.add_fd(pipe_fd)
     session_dict['PIPE-OUT-GTPU-ENCAPSULATE'] = pipe_out_gtpu_encapsulate
     session_dict['PIPE-OUT-GTPU-DECAPSULATE'] = pipe_out_gtpu_decapsulate
     session_dict['GTP-U'] = b'\x02' # inactive
-    ul_gtp= socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+    ul_gtp = runtime_resources.add(
+        socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+    )
     ul_gtp.bind((bridge_name,0)) 
     worker1 = Thread(target = encapsulate_gtp_u, args = (s_gtpu,ul_gtp,))
     worker2 = Thread(target = decapsulate_gtp_u, args = (s_gtpu,ul_gtp,))
@@ -2692,26 +2724,39 @@ if __name__ == "__main__":
         client.connect(server_address)
     except Exception as e:
         logging.info(f"Unable to connect to edge error {e} {server_address}")
-        os.system(f"echo FAILED>/var/log/sim/enb_status")
+        report_enb_status('FAILED')
         sys.exit()
 
     q = posixmq.Queue(sys_queue)
     while q.qsize()>0:
         q.get()
     #socket_list = [sys.stdin ,client, dev_nbiot]
-    send_fd= open(tmp_file, 'w')
+    send_fd = object()
     socket_list = [client]
     imeisv=1000000000000000
-    os.system(f"echo CONNECTED>/var/log/sim/enb_status")
+    report_enb_status('CONNECTED')
     while True:
         read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [], 0.01)
         if q.qsize()>0:
             read_sockets.append(send_fd)
         for sock in read_sockets:
             if sock == client:
-                buffer = client.recv(4096)
-                PDU.from_aper(buffer)
-                (type, pdu_dict) = PDU()
+                try:
+                    buffer = client.recv(65535)
+                except OSError:
+                    logging.exception("Unable to receive SCTP message")
+                    runtime_resources.close()
+                    sys.exit(1)
+                if not buffer:
+                    logging.error("SCTP connection closed by MME")
+                    runtime_resources.close()
+                    sys.exit(1)
+                try:
+                    PDU.from_aper(buffer)
+                    (type, pdu_dict) = PDU()
+                except Exception:
+                    logging.exception("Unable to decode S1AP message")
+                    continue
                 enb_ue_s1ap_id = extract_enb_ue_s1ap_id(pdu_dict)
                 if enb_ue_s1ap_id is not None:
                     indexed_session = session_index.by_enb_id(enb_ue_s1ap_id)
@@ -2743,6 +2788,11 @@ if __name__ == "__main__":
             elif sock == send_fd:
                   if q.qsize()>0: 
                     queue_msg=q.get()
+                    try:
+                        validate_command(queue_msg)
+                    except (TypeError, ValueError) as error:
+                        logging.warning(f"Dropping invalid simulator command: {error}")
+                        continue
                     if queue_msg['procedure']=='s1-setup':
                         session_dict=UserDict()
                         if 'mcc' in queue_msg and 'mnc' in queue_msg:
@@ -2757,20 +2807,24 @@ if __name__ == "__main__":
                         if 'tac1' in queue_msg:
                             session_dict['ENB-TAC1']=int(queue_msg['tac1']).to_bytes(2, byteorder='big')
                         else:
-                            session_dict['ENB-TAC1']=int(queue_msg[73]).to_bytes(2, byteorder='big')
+                            session_dict['ENB-TAC1']=int(73).to_bytes(2, byteorder='big')
                         if 'tac2' in queue_msg:
                             session_dict['ENB-TAC2']=int(queue_msg['tac2']).to_bytes(2, byteorder='big')
                         else:
-                            session_dict['ENB-TAC2']=int(queue_msg[74]).to_bytes(2, byteorder='big')
-                    else:
+                            session_dict['ENB-TAC2']=int(74).to_bytes(2, byteorder='big')
+                    elif queue_msg['procedure'] != 's1-reset':
                         if queue_msg['imsi'] in user_dict:
                                 logging.info(f'imsi {queue_msg} found in object')
                                 session_dict = user_dict[queue_msg['imsi']]
-                                try:
-                                    del gtp_dict[hexlify(socket.inet_ntoa(session_dict['PDN-ADDRESS-IPV4']))]
-                                    ue_eth_pair(session_dict['UE-NAMESPACE'])
-                                except:
-                                    pass
+                                if queue_msg['procedure'] == 'attach':
+                                    gtp_key = session_dict.get('GTP-KEY')
+                                    if gtp_key in gtp_dict:
+                                        del gtp_dict[gtp_key]
+                                    ue_pair = session_dict.get('UE-NAMESPACE')
+                                    if isinstance(ue_pair, (list, tuple)) and len(ue_pair) == 2:
+                                        network_runtime.delete_ue_namespace(session_dict['IMSI'])
+                                        ue_eth_pair(tuple(ue_pair))
+                                        session_dict['UE-NAMESPACE'] = None
                                 if 'auth-error' in queue_msg:
                                     if queue_msg['auth-error']:
                                         session_dict['AUTH-ERROR']=True
@@ -2818,7 +2872,8 @@ if __name__ == "__main__":
                                 session_dict['UL-TEID'] = None
                                 session_dict['AUTH-ERROR']=False
                                 session_dict['GTP-KEY']=None
-                                session_dict['UE-NAMESPACE']=queue_msg['imsi']
+                                session_dict['UE-NAMESPACE']=None
+                                session_dict['APN']=queue_msg.get('apn', 'internet')
                             else:
                                 break
                         if 'load_run_id' in queue_msg:
@@ -2838,7 +2893,7 @@ if __name__ == "__main__":
                         session_index.used_enb_ids(),
                     )
                     sync_session_index(session_index, user_dict, session_dict)
-    client.close()
+    runtime_resources.close()
 
 
 

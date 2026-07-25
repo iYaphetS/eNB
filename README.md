@@ -65,6 +65,18 @@ The basic flow could be for example, option 15 - to bring up the s1 interface, a
 ##
 log path :- /var/log/sim/
 
+## Operational Safety
+
+The simulator validates command inputs before they enter the POSIX queue and
+again when the eNB process consumes them. Invalid IMSIs, keys, PLMN values, IP
+addresses, numeric ranges, and load-test result socket paths are rejected.
+
+At startup, the simulator no longer deletes every Linux network namespace on
+the host. It only replaces or removes the exact UE namespace requested for a
+session. The `brlo` interface is reused only when it is an existing bridge;
+another interface with that name causes startup to fail instead of being
+deleted.
+
 ## Functionality
 
 The application supports currently the following options:

@@ -1,6 +1,9 @@
 # Import the modules needed to run the script.
 import sys, os
 import datetime
+import ipaddress
+import socket
+import subprocess
 from eNB_LOCAL import *
 from enb_id_allocator import allocate_enb_ue_s1ap_id
 import logging
@@ -13,7 +16,7 @@ MENU_WIDTH = 45
 LOG_WIDTH = 110
 LOG_SIZE = 100
 
-os.system("mkdir -p /var/log/sim/")
+os.makedirs('/var/log/sim', exist_ok=True)
 logging.basicConfig(filename="/var/log/sim/tool.log",filemode='w',format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S',level=logging.DEBUG)
 logger = logging.getLogger('edge_log')
 logging.info(" ********************* tool started ***************")
@@ -30,6 +33,37 @@ def dynamic_variable(used_enb_s1ap_ids=None):
     )
     var_dic= {'enb_s1ap_id':enb_s1ap_id}
     return var_dic
+
+
+def update_control_plane_routes(session_dict, activate):
+    action = 'replace' if activate else 'del'
+    try:
+        commands = []
+        pdn_ipv4 = session_dict.get('PDN-ADDRESS-IPV4')
+        if pdn_ipv4 is not None:
+            gateway = str(ipaddress.IPv4Address(pdn_ipv4))
+            commands.extend([
+                ['ip', 'route', action, '0.0.0.0/1', 'via', gateway],
+                ['ip', 'route', action, '128.0.0.0/1', 'via', gateway],
+            ])
+        if session_dict.get('PDN-ADDRESS-IPV6') is not None:
+            tun_name = f"tun{int(session_dict['SESSION-TYPE-TUN'])}"
+            commands.extend([
+                ['ip', '-6', 'route', action, '::/1', 'dev', tun_name],
+                ['ip', '-6', 'route', action, '8000::/1', 'dev', tun_name],
+            ])
+        if session_dict.get('GATEWAY') is not None and session_dict['SGW-GTP-ADDRESS']:
+            sgw_address = socket.inet_ntoa(session_dict['SGW-GTP-ADDRESS'][-1])
+            gateway = str(ipaddress.IPv4Address(session_dict['GATEWAY']))
+            commands.append([
+                'ip', 'route', action, f'{sgw_address}/32', 'via', gateway,
+            ])
+    except (KeyError, TypeError, ValueError, OSError) as error:
+        return print_log(session_dict, f"Unable to update control-plane routes: {error}")
+
+    for command in commands:
+        subprocess.run(command, check=False)
+    return session_dict
 menu_list = [ '  0. Show current settings',     \
               '  1. Set S1 Setup type',         \
               '  2. Set Attach Mobile Identity',\
@@ -497,14 +531,7 @@ def ProcessMenu(PDU, client, session_dict, msg, used_enb_s1ap_ids=None):
                 if len(session_dict['SGW-GTP-ADDRESS']) > 0:
                     os.write(session_dict['PIPE-OUT-GTPU-ENCAPSULATE'],session_dict['GTP-U'] + session_dict['SGW-GTP-ADDRESS'][-1] + session_dict['SGW-TEID'][-1])
                     os.write(session_dict['PIPE-OUT-GTPU-DECAPSULATE'],session_dict['GTP-U'] + session_dict['SGW-GTP-ADDRESS'][-1] + b'\x00\x00\x00' + bytes([session_dict['RAB-ID'][-1]]))
-                if session_dict['PDN-ADDRESS-IPV4'] is not None:                     
-                    subprocess.call("route add -net 0.0.0.0/1 gw " + session_dict['PDN-ADDRESS-IPV4'], shell=True)    
-                    subprocess.call("route add -net 128.0.0.0/1 gw " + session_dict['PDN-ADDRESS-IPV4'], shell=True)
-                if session_dict['PDN-ADDRESS-IPV6'] is not None:
-                    subprocess.call("route -A inet6 add ::/1 dev tun" + str(session_dict['SESSION-TYPE-TUN']) , shell=True) 
-                    subprocess.call("route -A inet6 add 8000::/1 dev tun" + str(session_dict['SESSION-TYPE-TUN'])  , shell=True)
-                if session_dict['GATEWAY'] is not None and len(session_dict['SGW-GTP-ADDRESS']) > 0:
-                    subprocess.call("route add " + socket.inet_ntoa(session_dict['SGW-GTP-ADDRESS'][-1])  + "/32 gw " + session_dict['GATEWAY'], shell=True)
+                session_dict = update_control_plane_routes(session_dict, True)
                 session_dict = print_log(session_dict, "GTP-U/IP over ControlPlane: Activation")
             else:
                 session_dict = print_log(session_dict, "GTP-U/IP over ControlPlane: Already activated.")
@@ -517,14 +544,7 @@ def ProcessMenu(PDU, client, session_dict, msg, used_enb_s1ap_ids=None):
             if len(session_dict['SGW-GTP-ADDRESS']) > 0:
                 os.write(session_dict['PIPE-OUT-GTPU-ENCAPSULATE'],session_dict['GTP-U'] + session_dict['SGW-GTP-ADDRESS'][-1] + session_dict['SGW-TEID'][-1])
                 os.write(session_dict['PIPE-OUT-GTPU-DECAPSULATE'],session_dict['GTP-U'] + session_dict['SGW-GTP-ADDRESS'][-1] + b'\x00\x00\x00' + bytes([session_dict['RAB-ID'][-1]]))
-            if session_dict['PDN-ADDRESS-IPV4'] is not None:     
-                subprocess.call("route del -net 0.0.0.0/1 gw " + session_dict['PDN-ADDRESS-IPV4'], shell=True)    
-                subprocess.call("route del -net 128.0.0.0/1 gw " + session_dict['PDN-ADDRESS-IPV4'], shell=True)
-            if session_dict['PDN-ADDRESS-IPV6'] is not None:
-                subprocess.call("route -A inet6 del ::/1 dev tun" + str(session_dict['SESSION-TYPE-TUN']) , shell=True) 
-                subprocess.call("route -A inet6 del 8000::/1 dev tun" + str(session_dict['SESSION-TYPE-TUN'])  , shell=True)    
-            if session_dict['GATEWAY'] is not None and len(session_dict['SGW-GTP-ADDRESS']) > 0:
-                subprocess.call("route del " + socket.inet_ntoa(session_dict['SGW-GTP-ADDRESS'][-1])  + "/32 gw " + session_dict['GATEWAY'], shell=True)
+            session_dict = update_control_plane_routes(session_dict, False)
             session_dict = print_log(session_dict, "GTP-U/IP over ControlPlane: Desactivation")
         else:
             session_dict = print_log(session_dict, "GTP-U/IP over ControlPlane: Already inactive.")

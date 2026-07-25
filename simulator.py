@@ -1,93 +1,108 @@
 #!/usr/bin/python3
-from ipcqueue import posixmq
-from optparse import OptionParser
-import threading
+import argparse
+import shlex
+import subprocess
 import sys
-import time
-import random
-import os
+from pathlib import Path
 
-dic={}
-parser = OptionParser()
-parser.add_option("-P", "--procedure", dest="process", help="starting simulator")
-parser.add_option("-I", "--enbip", dest="enb_ip", help="eNB Local IP Address")
-parser.add_option("-M", "--mmeip", dest="mme_ip", help="MME IP Address")
-parser.add_option("-S", "--imsi", dest="imsi", help="IMSI (15 digits)")
-parser.add_option("-K", "--key", dest="ki", help="ki for Milenage (if not using option -u)")  
-parser.add_option("-C", "--opc", dest="opc", help="opc for Milenage (if not using option -u)")  
-parser.add_option("-L", "--mcc", dest="mcc", help="Operator MCC")
-parser.add_option("-N", "--mnc", dest="mnc", help="Operator MNC")
-parser.add_option("-A", "--apn", dest="apn", help="Operator APN")
-parser.add_option("-T", "--tac1", dest="tac1", help="Operator TAC1")
-parser.add_option("-V", "--tac2", dest="tac2", help="Operator TAC2")
-parser.add_option("-E", "--enbid", dest="enb_id", help="Enodeb id")
-(options, args) = parser.parse_args()
-if len(sys.argv) <= 1:
-       print("No arguments passed - You need to specify parameters to use.")
-       parser.print_help()
-       exit(1)
-if options.process is not None:
-    dic['procedure'] = str(options.process)
-if options.enb_ip is not None:
-    dic['enb_ip'] = str(options.enb_ip)
-if options.mme_ip is not None:
-    dic['mme_ip'] = str(options.mme_ip)
-if options.imsi is not None:
-    dic['imsi'] = str(options.imsi)
-if options.ki is not None:
-    dic['ki'] = str(options.ki)
-if options.opc is not None:
-    dic['opc'] = str(options.opc)
-if options.mcc is not None:
-    dic['mcc'] = str(options.mcc)  
-if options.mnc is not None:
-    dic['mnc'] = str(options.mnc)  
-if options.apn is not None:
-    dic['apn'] = str(options.apn) 
-if options.tac1 is not None:
-    dic['tac1'] = str(options.tac1)
-if options.tac2 is not None:
-    dic['tac2'] = str(options.tac2)
-if options.enb_id is not None:
-    dic['enb_id'] = str(options.enb_id)
+from command_validation import validate_command
 
-# Function to validate linux command execution status
-def linux_command(command):
-    result= os.system(command)
-    if result != 0:
-        print (f'linux command  "{command}" failed')
-        sys.exit()
 
-# Func to send procedures
-def msg_queue(user_dic):
-    q=posixmq.Queue("/foo")
-    q.put(user_dic)
+SERVICE_PATH = Path('/lib/systemd/system/tool.service')
 
-# Func to start simulator
-def start_sim(enb,mme):
-    service_template=["[Unit]","Description=Simulator Service",
-                      "[Service]","Restart=always","User=root","WorkingDirectory=/root/eNB/","ExecStart=/usr/bin/python3 /root/eNB/eNB_LOCAL.py ",
-                      "[Install]","WantedBy=multi-user.target"]
-    with open("/lib/systemd/system/tool.service","w") as toolsvc:
-        for content in service_template:
-            if "ExecStart" in content:
-                toolsvc.write(f"{content} -i {enb} -m {mme} \n")
-            else:
-                toolsvc.write(f"{content} \n")
-    linux_command("sudo systemctl daemon-reload ")
-    linux_command("sudo service tool start")
-    linux_command("sudo systemctl enable tool --now")
 
-# Func to stop simulator
+def build_parser():
+    parser = argparse.ArgumentParser(description='Control the eNB S1 simulator')
+    parser.add_argument('-P', '--procedure', dest='procedure', required=True)
+    parser.add_argument('-I', '--enbip', dest='enb_ip')
+    parser.add_argument('-M', '--mmeip', dest='mme_ip')
+    parser.add_argument('-S', '--imsi')
+    parser.add_argument('-K', '--key', dest='ki')
+    parser.add_argument('-C', '--opc')
+    parser.add_argument('-L', '--mcc')
+    parser.add_argument('-N', '--mnc')
+    parser.add_argument('-A', '--apn')
+    parser.add_argument('-T', '--tac1')
+    parser.add_argument('-V', '--tac2')
+    parser.add_argument('-E', '--enbid', dest='enb_id')
+    return parser
+
+
+def command_from_args(args):
+    command = {
+        key: str(value)
+        for key, value in vars(args).items()
+        if value is not None
+    }
+    return validate_command(command)
+
+
+def run_command(command):
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"command failed: {' '.join(command)}") from error
+
+
+def msg_queue(command):
+    from ipcqueue import posixmq
+
+    queue = posixmq.Queue('/foo')
+    queue.put(command)
+
+
+def service_definition(enb_ip, mme_ip, project_dir=None, python=None):
+    project_dir = str(Path(project_dir or Path(__file__).resolve().parent)).replace('\\', '/')
+    python = python or sys.executable
+    executable = f'{project_dir}/eNB_LOCAL.py'
+    return '\n'.join([
+        '[Unit]',
+        'Description=eNB S1 Simulator',
+        'After=network-online.target',
+        '',
+        '[Service]',
+        'Restart=always',
+        'User=root',
+        f'WorkingDirectory={project_dir}',
+        'ExecStart=' + ' '.join(map(shlex.quote, [
+            python, str(executable), '-i', enb_ip, '-m', mme_ip,
+        ])),
+        '',
+        '[Install]',
+        'WantedBy=multi-user.target',
+        '',
+    ])
+
+
+def start_sim(enb_ip, mme_ip):
+    SERVICE_PATH.write_text(service_definition(enb_ip, mme_ip))
+    run_command(['sudo', 'systemctl', 'daemon-reload'])
+    run_command(['sudo', 'systemctl', 'enable', '--now', SERVICE_PATH.name])
+
+
 def stop_sim():
-    linux_command("sudo service tool stop")
-    linux_command("rm -rf /lib/systemd/system/tool.service")
-    linux_command("sudo systemctl daemon-reload")
+    run_command(['sudo', 'systemctl', 'stop', SERVICE_PATH.name])
+    try:
+        SERVICE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+    run_command(['sudo', 'systemctl', 'daemon-reload'])
 
-if dic['procedure'] == "start-simulator":
-    start_sim(dic['enb_ip'],dic['mme_ip']) 
-elif dic['procedure'] == "stop-simulator":
-    stop_sim()  
-elif 'procedure' in dic:
-    msg_queue(dic)
 
+def main(argv=None):
+    parser = build_parser()
+    try:
+        command = command_from_args(parser.parse_args(argv))
+        procedure = command['procedure']
+        if procedure == 'start-simulator':
+            start_sim(command['enb_ip'], command['mme_ip'])
+        elif procedure == 'stop-simulator':
+            stop_sim()
+        else:
+            msg_queue(command)
+    except (ValueError, RuntimeError, OSError) as error:
+        parser.error(str(error))
+
+
+if __name__ == '__main__':
+    main()
