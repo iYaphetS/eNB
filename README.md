@@ -120,9 +120,17 @@ python3 load_test.py --subscribers subscribers.example.csv --attach-rate 10 \
 ```
 
 The JSON report contains totals, success rate, requested and achieved load,
-test duration, per-subscriber outcomes, and Attach latency
-min/P50/P95/P99/max values. Status timestamps are checked so results left by an
-earlier run are ignored.
+test duration, maximum in-flight users, message-queue blocking time,
+per-subscriber outcomes, a per-second timeline, and Attach latency
+min/P50/P95/P99/max values.
+
+Each run creates a unique local Unix datagram socket. The simulator publishes
+Attach results to this socket without blocking its S1 processing loop. UE
+status files are checked once per second as a compatibility fallback if an
+event is lost; timestamps are checked so results left by an earlier run are
+ignored. Queue blocking time is reported separately because sustained blocking
+indicates that the simulator, rather than the core network, is limiting the
+requested load.
 
 This runner measures signaling load through the simulator's existing single
 SCTP association. It does not generate user-plane traffic or emulate multiple

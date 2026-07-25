@@ -4,7 +4,10 @@ import csv
 import json
 import math
 import time
+from collections import defaultdict
 from pathlib import Path
+
+from load_result_channel import LoadResultServer
 
 
 TERMINAL_STATUSES = {'CONNECTED', 'FAILED'}
@@ -54,6 +57,7 @@ def build_summary(results, started_at, finished_at):
     failed = [result for result in results if result['status'] == 'FAILED']
     timed_out = [result for result in results if result['status'] == 'TIMEOUT']
     latencies = [result['latency_ms'] for result in connected]
+    queue_block_times = [result.get('queue_block_ms', 0) for result in results]
     total = len(results)
     return {
         'total': total,
@@ -68,6 +72,10 @@ def build_summary(results, started_at, finished_at):
             'p95': percentile(latencies, 95),
             'p99': percentile(latencies, 99),
             'max': max(latencies) if latencies else None,
+        },
+        'queue_block_ms': {
+            'max': max(queue_block_times) if queue_block_times else None,
+            'p95': percentile(queue_block_times, 95),
         },
     }
 
@@ -93,6 +101,10 @@ def run_attach_load(
         status_reader,
         attach_rate,
         timeout,
+        event_reader=None,
+        run_id=None,
+        result_socket=None,
+        status_poll_interval=None,
         poll_interval=0.05,
         clock=time.time,
         sleep=time.sleep):
@@ -109,42 +121,84 @@ def run_attach_load(
     last_sent_at = None
     pending = {}
     results = []
+    timeline = defaultdict(lambda: {
+        'sent': 0,
+        'connected': 0,
+        'failed': 0,
+        'timed_out': 0,
+    })
+    max_pending = 0
+    next_status_poll = started_at
+    if status_poll_interval is None:
+        status_poll_interval = poll_interval
 
     while sent_count < len(subscribers) or pending:
         now = clock()
         if sent_count < len(subscribers) and now >= next_send_at:
             subscriber = subscribers[sent_count]
-            queue_put({
+            message = {
                 'procedure': 'attach',
                 'imsi': subscriber['imsi'],
                 'ki': subscriber['key'],
                 'opc': subscriber['opc'],
                 'mcc': subscriber['mcc'],
                 'mnc': subscriber['mnc'],
-            })
+            }
+            if run_id and result_socket:
+                message['load_run_id'] = run_id
+                message['load_result_socket'] = result_socket
+            queue_started_at = clock()
+            queue_put(message)
+            queued_at = clock()
             if first_sent_at is None:
-                first_sent_at = now
-            last_sent_at = now
-            pending[subscriber['imsi']] = now
+                first_sent_at = queue_started_at
+            last_sent_at = queued_at
+            pending[subscriber['imsi']] = {
+                'sent_at': queue_started_at,
+                'queue_block_ms': round((queued_at - queue_started_at) * 1000, 3),
+            }
+            timeline[int(queue_started_at - started_at)]['sent'] += 1
             sent_count += 1
             next_send_at = started_at + (sent_count * interval)
+            max_pending = max(max_pending, len(pending))
 
-        for imsi, sent_at in list(pending.items()):
-            status = status_reader(imsi, sent_at)
+        event_statuses = {}
+        if event_reader is not None:
+            for event in event_reader():
+                status = event.get('status')
+                if event.get('imsi') in pending and status in TERMINAL_STATUSES:
+                    event_statuses[event['imsi']] = status
+
+        should_poll_status = (
+            status_reader is not None and clock() >= next_status_poll
+        )
+        if should_poll_status:
+            next_status_poll = clock() + status_poll_interval
+
+        for imsi, pending_result in list(pending.items()):
+            sent_at = pending_result['sent_at']
+            status = event_statuses.get(imsi)
+            if status is None and should_poll_status:
+                status = status_reader(imsi, sent_at)
             completed_at = clock()
             if status:
                 results.append({
                     'imsi': imsi,
                     'status': status,
                     'latency_ms': round((completed_at - sent_at) * 1000, 3),
+                    'queue_block_ms': pending_result['queue_block_ms'],
                 })
+                timeline_bucket = timeline[int(completed_at - started_at)]
+                timeline_bucket['connected' if status == 'CONNECTED' else 'failed'] += 1
                 del pending[imsi]
             elif completed_at - sent_at >= timeout:
                 results.append({
                     'imsi': imsi,
                     'status': 'TIMEOUT',
                     'latency_ms': round((completed_at - sent_at) * 1000, 3),
+                    'queue_block_ms': pending_result['queue_block_ms'],
                 })
+                timeline[int(completed_at - started_at)]['timed_out'] += 1
                 del pending[imsi]
 
         if sent_count < len(subscribers) or pending:
@@ -159,9 +213,14 @@ def run_attach_load(
     summary = build_summary(results, started_at, finished_at)
     summary['enqueue_duration_seconds'] = round(enqueue_duration, 3)
     summary['achieved_attach_rate'] = round(sent_count / enqueue_duration, 3)
+    summary['max_pending'] = max_pending
     return {
         'summary': summary,
         'users': results,
+        'timeline': [
+            {'second': second, **timeline[second]}
+            for second in sorted(timeline)
+        ],
     }
 
 
@@ -198,13 +257,18 @@ def main():
 
     subscribers = load_subscribers(args.subscribers)
     queue_put = _queue_writer()
-    report = run_attach_load(
-        subscribers,
-        queue_put,
-        StatusReader(args.status_dir).read,
-        args.attach_rate,
-        args.timeout,
-    )
+    with LoadResultServer() as result_server:
+        report = run_attach_load(
+            subscribers,
+            queue_put,
+            StatusReader(args.status_dir).read,
+            args.attach_rate,
+            args.timeout,
+            event_reader=result_server.read,
+            run_id=result_server.run_id,
+            result_socket=result_server.path,
+            status_poll_interval=1,
+        )
     if args.hold_seconds > 0:
         time.sleep(args.hold_seconds)
     if args.detach:

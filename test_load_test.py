@@ -86,6 +86,48 @@ class LoadTestTest(unittest.TestCase):
         self.assertAlmostEqual(2, report['summary']['achieved_attach_rate'], delta=0.1)
         self.assertEqual(3, len(sent_at))
 
+    def test_consumes_result_events_and_reports_queue_blocking(self):
+        subscriber = {
+            'imsi': '111111000000001',
+            'key': '0' * 32,
+            'opc': '1' * 32,
+            'mcc': '111',
+            'mnc': '111',
+        }
+        clock = FakeClock()
+        queued_messages = []
+
+        def queue_put(message):
+            queued_messages.append(message)
+            clock.sleep(0.02)
+
+        def event_reader():
+            if not queued_messages:
+                return []
+            return [{
+                'imsi': subscriber['imsi'],
+                'status': 'CONNECTED',
+            }]
+
+        report = run_attach_load(
+            [subscriber],
+            queue_put,
+            None,
+            attach_rate=10,
+            timeout=1,
+            event_reader=event_reader,
+            run_id='run-1',
+            result_socket='/tmp/result.sock',
+            clock=clock.time,
+            sleep=clock.sleep,
+        )
+
+        self.assertEqual('run-1', queued_messages[0]['load_run_id'])
+        self.assertEqual('/tmp/result.sock', queued_messages[0]['load_result_socket'])
+        self.assertEqual(20, report['summary']['queue_block_ms']['max'])
+        self.assertEqual(1, report['summary']['max_pending'])
+        self.assertEqual(1, report['timeline'][0]['connected'])
+
     def test_percentiles_use_nearest_rank(self):
         self.assertEqual(30, percentile([10, 20, 30, 40], 75))
         self.assertIsNone(percentile([], 95))

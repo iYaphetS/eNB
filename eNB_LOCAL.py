@@ -29,9 +29,20 @@ from kamene.all import send
 import multiprocessing
 import eNAS, eMENU
 from session_index import SessionIndex, extract_enb_ue_s1ap_id, sync_session_index
+from load_result_channel import LoadResultPublisher
 os.system("mkdir -p /var/log/sim/")
 logging.basicConfig(filename="/var/log/sim/tool.log",filemode='w',format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',datefmt='%Y-%m-%d %H:%M:%S',level=logging.DEBUG)
 logger = logging.getLogger('edge_log')
+load_result_publisher = LoadResultPublisher()
+
+
+def report_ue_status(session, status):
+    try:
+        with open(f"/var/log/sim/ue_{session['IMSI']}_status", 'w') as status_file:
+            status_file.write(status)
+    except OSError as error:
+        logging.warning(f"Unable to write UE status: {error}")
+    load_result_publisher.publish(session, status)
 
 
 #tries to import all options for retrieving IMSI, and RES, CK and IK from USIM.
@@ -1340,7 +1351,7 @@ def ProcessDownlinkNAS(dic):
 
     elif message_type == 84: # authentication reject
         dic = eMENU.print_log(dic, "NAS: AuthenticatonReject received")
-        os.system(f"echo FAILED>/var/log/sim/ue_{dic['IMSI']}_status")
+        report_ue_status(dic, 'FAILED')
         dic['NAS'] = None
         dic['STATE'] = 1
 
@@ -1453,13 +1464,13 @@ def ProcessDownlinkNAS(dic):
         mac_bytes = nas_hash(dic)
         dic['NAS'] = nas_security_protected_nas_message(2,mac_bytes,bytes([dic['UP-COUNT']%256]),dic['NAS-ENC']) #mudei de 4 para 2
         dic = eMENU.print_log(dic, "NAS: sending AttachComplete")
-        os.system(f"echo CONNECTED>/var/log/sim/ue_{dic['IMSI']}_status")
+        report_ue_status(dic, 'CONNECTED')
         dic['STATE'] = 2
 
 
     elif message_type == 68: #attach reject
         dic = eMENU.print_log(dic, "NAS: AttachReject received")
-        os.system(f"echo FAILED>/var/log/sim/ue_{dic['IMSI']}_status")
+        report_ue_status(dic, 'FAILED')
         dic['NAS'] = None
         dic['STATE'] = 1
         
@@ -2689,11 +2700,13 @@ if __name__ == "__main__":
         q.get()
     #socket_list = [sys.stdin ,client, dev_nbiot]
     send_fd= open(tmp_file, 'w')
-    socket_list = [send_fd,client]
+    socket_list = [client]
     imeisv=1000000000000000
     os.system(f"echo CONNECTED>/var/log/sim/enb_status")
     while True:
-        read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])
+        read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [], 0.01)
+        if q.qsize()>0:
+            read_sockets.append(send_fd)
         for sock in read_sockets:
             if sock == client:
                 buffer = client.recv(4096)
@@ -2808,6 +2821,10 @@ if __name__ == "__main__":
                                 session_dict['UE-NAMESPACE']=queue_msg['imsi']
                             else:
                                 break
+                        if 'load_run_id' in queue_msg:
+                            session_dict['LOAD-TEST-RUN-ID'] = queue_msg['load_run_id']
+                        if 'load_result_socket' in queue_msg:
+                            session_dict['LOAD-TEST-RESULT-SOCKET'] = queue_msg['load_result_socket']
                     msg=queue_msg['procedure']
                     if 'IMSI' in session_dict:
                         logging.info(f"{msg} {session_dict['IMSI']} no if active user in tool {len(user_dict)} no of gtp tunnel {len(gtp_dict)}")
