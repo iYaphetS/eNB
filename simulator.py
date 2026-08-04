@@ -22,10 +22,12 @@ def build_parser():
     parser.add_argument('-L', '--mcc')
     parser.add_argument('-N', '--mnc')
     parser.add_argument('-A', '--apn')
+    parser.add_argument('--pdn-type', dest='pdp_type')
     parser.add_argument('-T', '--tac1')
     parser.add_argument('-V', '--tac2')
     parser.add_argument('-E', '--enbid', dest='enb_id')
     parser.add_argument('--gtpu-ip', dest='gtpu_ip')
+    parser.add_argument('--s1-port', dest='s1_port')
     parser.add_argument('--external-gtpu', action='store_true')
     parser.add_argument('--bearer-events', dest='bearer_events')
     return parser
@@ -55,13 +57,16 @@ def msg_queue(command):
 
 
 def service_definition(enb_ip, mme_ip, project_dir=None, python=None,
-                       gtpu_ip=None, external_gtpu=False, bearer_events=None):
+                       gtpu_ip=None, s1_port=None, external_gtpu=False,
+                       bearer_events=None):
     project_dir = str(Path(project_dir or Path(__file__).resolve().parent)).replace('\\', '/')
     python = python or sys.executable
     executable = f'{project_dir}/eNB_LOCAL.py'
     command = [python, str(executable), '-i', enb_ip, '-m', mme_ip]
     if gtpu_ip:
         command.extend(['--gtpu-ip', gtpu_ip])
+    if s1_port:
+        command.extend(['--s1-port', str(s1_port)])
     if external_gtpu:
         command.append('--external-gtpu')
     if bearer_events:
@@ -83,10 +88,11 @@ def service_definition(enb_ip, mme_ip, project_dir=None, python=None,
     ])
 
 
-def start_sim(enb_ip, mme_ip, gtpu_ip=None, external_gtpu=False,
+def start_sim(enb_ip, mme_ip, gtpu_ip=None, s1_port=None, external_gtpu=False,
               bearer_events=None):
     SERVICE_PATH.write_text(service_definition(
-        enb_ip, mme_ip, gtpu_ip=gtpu_ip, external_gtpu=external_gtpu,
+        enb_ip, mme_ip, gtpu_ip=gtpu_ip, s1_port=s1_port,
+        external_gtpu=external_gtpu,
         bearer_events=bearer_events))
     run_command(['sudo', 'systemctl', 'daemon-reload'])
     run_command(['sudo', 'systemctl', 'enable', '--now', SERVICE_PATH.name])
@@ -109,6 +115,7 @@ def main(argv=None):
         if procedure == 'start-simulator':
             start_sim(
                 command['enb_ip'], command['mme_ip'], command.get('gtpu_ip'),
+                command.get('s1_port'),
                 command.get('external_gtpu', False), command.get('bearer_events'))
         elif procedure == 'stop-simulator':
             stop_sim()

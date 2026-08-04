@@ -793,19 +793,19 @@ def nas_pco(pdp_type,pcscf_restoration):
     if pdp_type == 1:
         len_pco = struct.pack("!H", 32)
         if pcscf_restoration == False:
-            return b'\x80\x80\x21\x1c\x01\x00\x00\x1c\x81\x06\x00\x00\x00\x00\x82\x06\x00\x00\x00\x00\x83\x06\x00\x00\x00\x00\x84\x06\x00\x00\x00\x00\x00\x0c\x00\x00\x0e\x00'        
+            return b'\x80\x80\x21\x1c\x01\x00\x00\x1c\x81\x06\x00\x00\x00\x00\x82\x06\x00\x00\x00\x00\x83\x06\x00\x00\x00\x00\x84\x06\x00\x00\x00\x00\x00\x0e\x00'
         else:
             return b'\x80\x80\x21\x1c\x01\x00\x00\x1c\x81\x06\x00\x00\x00\x00\x82\x06\x00\x00\x00\x00\x83\x06\x00\x00\x00\x00\x84\x06\x00\x00\x00\x00\x00\x0c\x00\x00\x12\x00\x00\x0e\x00' 
     elif pdp_type == 2:
         len_pco = struct.pack("!H", 4)
         if pcscf_restoration == False:
-            return b'\x80\x00\x03\x00\x00\x01\x00\x00\x0e\x00'
+            return b'\x80\x00\x03\x00\x00\x0e\x00'
         else:
             return b'\x80\x00\x03\x00\x00\x01\x00\x00\x12\x00\x00\x0e\x00'
     elif pdp_type == 3:
         len_pco = struct.pack("!H", 33)
         if pcscf_restoration == False:
-            return b'\x80\x80\x21\x1c\x01\x00\x00\x1c\x81\x06\x00\x00\x00\x00\x82\x06\x00\x00\x00\x00\x83\x06\x00\x00\x00\x00\x84\x06\x00\x00\x00\x00\x00\x03\x00\x00\x0c\x00\x00\x01\x00\x00\x0e\x00'
+            return b'\x80\x80\x21\x1c\x01\x00\x00\x1c\x81\x06\x00\x00\x00\x00\x82\x06\x00\x00\x00\x00\x83\x06\x00\x00\x00\x00\x84\x06\x00\x00\x00\x00\x00\x03\x00\x00\x0e\x00'
         else:
             return b'\x80\x80\x21\x1c\x01\x00\x00\x1c\x81\x06\x00\x00\x00\x00\x82\x06\x00\x00\x00\x00\x83\x06\x00\x00\x00\x00\x84\x06\x00\x00\x00\x00\x00\x03\x00\x00\x0c\x00\x00\x01\x00\x00\x12\x00\x00\x0e\x00'
      
@@ -2686,6 +2686,8 @@ if __name__ == "__main__":
     parser.add_option("-m", "--mme", dest="mme_ip", help="MME IP Address")
     parser.add_option("--gtpu-ip", dest="gtpu_ip",
                       help="GTP-U address advertised to the MME (defaults to --ip)")
+    parser.add_option("--s1-port", dest="s1_port", type="int", default=0,
+                      help="local SCTP source port (defaults to an ephemeral port)")
     parser.add_option("--external-gtpu", action="store_true", default=False,
                       help="disable the built-in GTP-U and Linux namespace data plane")
     parser.add_option("--bearer-events", dest="bearer_events",
@@ -2715,7 +2717,7 @@ if __name__ == "__main__":
     )
     client.settimeout(5)
     try:
-       client.bind((options.eNB_ip, 0))
+       client.bind((options.eNB_ip, options.s1_port))
     except Exception as e:
        logging.info(f"enb ip error {e} {options.eNB_ip}")
        sys.exit()
@@ -2855,9 +2857,10 @@ if __name__ == "__main__":
                             session_dict['ENB-TAC2']=int(queue_msg['tac2']).to_bytes(2, byteorder='big')
                         else:
                             session_dict['ENB-TAC2']=int(74).to_bytes(2, byteorder='big')
+                        session_dict['ENB-TAC'] = session_dict['ENB-TAC1']
                     elif queue_msg['procedure'] != 's1-reset':
                         if queue_msg['imsi'] in user_dict:
-                                logging.info(f'imsi {queue_msg} found in object')
+                                logging.info(f"imsi {queue_msg['imsi']} found in object")
                                 session_dict = user_dict[queue_msg['imsi']]
                                 if queue_msg['procedure'] == 'attach':
                                     bearer_event_publisher.remove_session(session_dict)
@@ -2877,7 +2880,11 @@ if __name__ == "__main__":
                         else:
                             if set(('imsi', 'ki','opc','mcc','mnc')).issubset(queue_msg):
                                 imeisv += 1
-                                user_dict[queue_msg['imsi']]=UserDict()
+                                user_dict[queue_msg['imsi']]=UserDict({
+                                    key: session_dict[key]
+                                    for key in ('ENB-ID', 'ENB-CELLID', 'ENB-TAC1',
+                                                'ENB-TAC2', 'ENB-TAC')
+                                })
                                 session_dict=user_dict[queue_msg['imsi']]
                                 session_dict['MME-UE-S1AP-ID']=None
                                 session_dict['IMSI']=queue_msg['imsi']
@@ -2919,6 +2926,8 @@ if __name__ == "__main__":
                                 session_dict['GTP-KEY']=None
                                 session_dict['UE-NAMESPACE']=None
                                 session_dict['APN']=queue_msg.get('apn', 'internet')
+                                session_dict['ATTACH-PDN'] = 1 if queue_msg.get('apn') else None
+                                session_dict['PDP-TYPE'] = int(queue_msg.get('pdp_type', 1))
                             else:
                                 break
                         if 'load_run_id' in queue_msg:
@@ -2939,7 +2948,3 @@ if __name__ == "__main__":
                     )
                     sync_session_index(session_index, user_dict, session_dict)
     runtime_resources.close()
-
-
-
-

@@ -2,7 +2,7 @@
 
 Example:
   sudo ./t-rex-64 -f trex_gtpu_profile.py -m 1 \
-    -t manifest=/tmp/trex-sessions.json,direction=uplink,src_mac=...,dst_mac=...
+    -t manifest=/tmp/trex-sessions.json,traffic_direction=uplink,src_mac=...,dst_mac=...
 """
 import argparse
 import json
@@ -23,11 +23,12 @@ class EnbGtpuProfile:
 
         parser = argparse.ArgumentParser(description='eNB GTP-U bearer profile')
         parser.add_argument('--manifest', required=True)
-        parser.add_argument('--direction', choices=('uplink', 'downlink'),
-                            default='uplink')
-        parser.add_argument('--src-mac', required=True)
-        parser.add_argument('--dst-mac', required=True)
-        parser.add_argument('--server-ip', default='198.18.0.1')
+        parser.add_argument(
+            '--traffic-direction', '--traffic_direction',
+            choices=('uplink', 'downlink'), default='uplink')
+        parser.add_argument('--src-mac', '--src_mac', required=True)
+        parser.add_argument('--dst-mac', '--dst_mac', required=True)
+        parser.add_argument('--server-ip', '--server_ip', default='198.18.0.1')
         args = parser.parse_args(tunables)
         with open(args.manifest, encoding='utf-8') as source:
             manifest = json.load(source)
@@ -35,10 +36,10 @@ class EnbGtpuProfile:
         payload_size = int(traffic['inner_payload_size'])
         if payload_size < 28:
             raise ValueError('inner_payload_size must be at least 28 bytes')
-        pps_key = f'{args.direction}_pps_per_bearer'
+        pps_key = f'{args.traffic_direction}_pps_per_bearer'
         streams = []
         for session in manifest['sessions']:
-            if args.direction == 'uplink':
+            if args.traffic_direction == 'uplink':
                 outer_src, outer_dst = session['enb_gtpu_ip'], session['upf_ip']
                 inner_src, inner_dst = session['ue_ip'], args.server_ip
                 teid = session['uplink_teid']
@@ -47,7 +48,7 @@ class EnbGtpuProfile:
             padding = b'\x00' * (payload_size - 28)
             inner_packet = (IP(src=inner_src, dst=inner_dst) /
                             UDP(sport=1024, dport=9000) / Raw(padding))
-            if args.direction == 'uplink':
+            if args.traffic_direction == 'uplink':
                 inner = bytes(inner_packet)
                 packet = (Ether(src=args.src_mac, dst=args.dst_mac) /
                           IP(src=outer_src, dst=outer_dst) /

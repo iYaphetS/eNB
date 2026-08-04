@@ -40,6 +40,8 @@ def validate_command(command):
         raise ValueError('MNC must contain 2 or 3 digits')
     if command.get('apn') and not APN.fullmatch(command['apn']):
         raise ValueError('APN contains invalid characters')
+    if command.get('pdp_type') and command['pdp_type'] not in ('1', '2', '3', '5'):
+        raise ValueError('pdn_type must be 1, 2, 3, or 5')
     if command.get('load_run_id') and not RUN_ID.fullmatch(command['load_run_id']):
         raise ValueError('invalid load test run ID')
     if command.get('load_result_socket') and not RESULT_SOCKET.fullmatch(
@@ -48,6 +50,7 @@ def validate_command(command):
     _validate_integer(command, 'tac1', 0, 65535)
     _validate_integer(command, 'tac2', 0, 65535)
     _validate_integer(command, 'enb_id', 0, 1048575)
+    _validate_integer(command, 's1_port', 1, 65535)
 
     if procedure == 'start-simulator':
         _require(command, 'enb_ip', 'mme_ip')

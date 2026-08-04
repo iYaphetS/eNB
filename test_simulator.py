@@ -16,10 +16,12 @@ class SimulatorTest(unittest.TestCase):
             mcc=None,
             mnc=None,
             apn=None,
+            pdp_type=None,
             tac1=None,
             tac2=None,
             enb_id=None,
             gtpu_ip=None,
+            s1_port=None,
             external_gtpu=False,
             bearer_events=None,
         )
@@ -45,8 +47,10 @@ class SimulatorTest(unittest.TestCase):
         service = service_definition(
             '192.0.2.1', '192.0.2.2', project_dir='/opt/enb',
             python='/usr/bin/python3', gtpu_ip='198.51.100.10',
+            s1_port=36412,
             external_gtpu=True, bearer_events='/var/log/sim/bearers.jsonl')
         self.assertIn('--gtpu-ip 198.51.100.10', service)
+        self.assertIn('--s1-port 36412', service)
         self.assertIn('--external-gtpu', service)
         self.assertIn('--bearer-events /var/log/sim/bearers.jsonl', service)
 

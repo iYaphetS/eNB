@@ -12,8 +12,13 @@ class CommandValidationTest(unittest.TestCase):
             'opc': '1' * 32,
             'mcc': '111',
             'mnc': '11',
+            'pdp_type': '3',
         }
         self.assertIs(command, validate_command(command))
+
+    def test_rejects_invalid_pdn_type(self):
+        with self.assertRaisesRegex(ValueError, 'pdn_type'):
+            validate_command({'procedure': 's1-setup', 'pdp_type': '4'})
 
     def test_rejects_command_injection_in_procedure(self):
         with self.assertRaisesRegex(ValueError, 'procedure'):
@@ -59,10 +64,15 @@ class CommandValidationTest(unittest.TestCase):
             'enb_ip': '192.0.2.1',
             'mme_ip': '192.0.2.2',
             'gtpu_ip': '198.51.100.10',
+            's1_port': '36412',
             'external_gtpu': True,
             'bearer_events': '/var/log/sim/bearers.jsonl',
         }
         self.assertIs(command, validate_command(command))
+
+    def test_rejects_invalid_s1_port(self):
+        with self.assertRaisesRegex(ValueError, 's1_port'):
+            validate_command({'procedure': 's1-setup', 's1_port': '65536'})
 
 
 if __name__ == '__main__':

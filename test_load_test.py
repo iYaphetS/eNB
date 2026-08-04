@@ -93,6 +93,8 @@ class LoadTestTest(unittest.TestCase):
             'opc': '1' * 32,
             'mcc': '111',
             'mnc': '111',
+            'apn': '3gnet',
+            'pdn_type': '3',
         }
         clock = FakeClock()
         queued_messages = []
@@ -124,6 +126,8 @@ class LoadTestTest(unittest.TestCase):
 
         self.assertEqual('run-1', queued_messages[0]['load_run_id'])
         self.assertEqual('/tmp/result.sock', queued_messages[0]['load_result_socket'])
+        self.assertEqual('3gnet', queued_messages[0]['apn'])
+        self.assertEqual('3', queued_messages[0]['pdp_type'])
         self.assertEqual(20, report['summary']['queue_block_ms']['max'])
         self.assertEqual(1, report['summary']['max_pending'])
         self.assertEqual(1, report['timeline'][0]['connected'])

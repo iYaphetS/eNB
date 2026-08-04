@@ -30,6 +30,15 @@ class NetworkRuntimeTest(unittest.TestCase):
         runtime.ensure_bridge('brlo')
 
         self.assertIn(['ip', 'link', 'add', 'brlo', 'type', 'bridge'], runner.commands)
+        self.assertIn(
+            ['ip', '-4', 'addr', 'flush', 'dev', 'brlo', 'scope', 'global'],
+            runner.commands,
+        )
+        self.assertIn(
+            ['ip', 'link', 'set', 'dev', 'brlo', 'address',
+             '02:00:00:00:00:01'],
+            runner.commands,
+        )
         self.assertFalse(any('delete' in command for command in runner.commands))
 
     def test_reuses_existing_bridge(self):
@@ -49,6 +58,45 @@ class NetworkRuntimeTest(unittest.TestCase):
         self.assertEqual(
             [['ip', 'netns', 'delete', '111111000000001']],
             delete_commands,
+        )
+
+    def test_enables_peer_before_adding_default_route(self):
+        runner = FakeRunner()
+        NetworkRuntime(runner).setup_ue_namespace(
+            '111111000000001', 'veth0', 'neth0', '10.10.20.14', 'brlo')
+
+        peer_up = ['ip', 'netns', 'exec', '111111000000001',
+                   'ip', 'link', 'set', 'dev', 'neth0', 'up']
+        default_route = ['ip', 'netns', 'exec', '111111000000001',
+                         'ip', 'route', 'replace', 'default',
+                         'via', '169.254.0.1', 'dev', 'neth0', 'onlink']
+        self.assertLess(runner.commands.index(peer_up), runner.commands.index(default_route))
+
+    def test_uses_link_local_gateway_outside_ue_address_pool(self):
+        runner = FakeRunner()
+        NetworkRuntime(runner).setup_ue_namespace(
+            '111111000000001', 'veth0', 'neth0', '10.10.20.1', 'brlo')
+
+        self.assertIn(
+            ['ip', 'netns', 'exec', '111111000000001', 'ip', 'addr',
+             'replace', '10.10.20.1/32', 'dev', 'neth0'],
+            runner.commands,
+        )
+        self.assertIn(
+            ['ip', 'addr', 'replace', '169.254.0.1/16', 'dev', 'brlo'],
+            runner.commands,
+        )
+        self.assertIn(
+            ['ip', 'netns', 'exec', '111111000000001', 'ip', 'neigh',
+             'replace', '169.254.0.1', 'lladdr', '02:00:00:00:00:01',
+             'nud', 'permanent', 'dev', 'neth0'],
+            runner.commands,
+        )
+        self.assertIn(
+            ['ip', 'netns', 'exec', '111111000000001', 'ip', 'route',
+             'replace', 'default', 'via', '169.254.0.1', 'dev', 'neth0',
+             'onlink'],
+            runner.commands,
         )
 
     def test_rejects_injected_namespace_name(self):

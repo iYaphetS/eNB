@@ -144,6 +144,10 @@ def run_attach_load(
                 'mcc': subscriber['mcc'],
                 'mnc': subscriber['mnc'],
             }
+            if subscriber.get('apn'):
+                message['apn'] = subscriber['apn']
+            if subscriber.get('pdn_type'):
+                message['pdp_type'] = subscriber['pdn_type']
             if run_id and result_socket:
                 message['load_run_id'] = run_id
                 message['load_result_socket'] = result_socket

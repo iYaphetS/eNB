@@ -219,13 +219,13 @@ Start TRex in interactive stateless mode, open `trex-console`, and run:
 
 ```
 start -f /opt/eNB/trex_gtpu_profile.py -m 1 \
-  -t manifest=/tmp/trex-sessions.json,direction=uplink,\
+  -t manifest=/tmp/trex-sessions.json,traffic_direction=uplink,\
 src_mac=02:00:00:00:00:01,dst_mac=02:00:00:00:00:02
 ```
 
 For uplink, run the profile on the TRex access-side port; it generates GTP-U
 packets with the UL TEID learned over S1AP. For downlink, select
-`direction=downlink` on the N6/data-network port; it sends plain IP packets to
+`traffic_direction=downlink` on the N6/data-network port; it sends plain IP packets to
 each UE address so the UPF under test must perform the downlink GTP-U
 encapsulation. The exported DL TEID can be used to validate captured access-
 side packets.
@@ -235,5 +235,4 @@ ports; creating 100k independent STL streams on one port has significant
 control-plane and memory overhead. Packet transmission, NIC port mapping, MAC
 addressing, and UPF reachability must be validated on the target TRex/UPF host.
  
-
 

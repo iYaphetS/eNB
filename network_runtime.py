@@ -5,6 +5,7 @@ import subprocess
 
 INTERFACE_NAME = re.compile(r'^[A-Za-z0-9_.-]{1,15}$')
 NAMESPACE_NAME = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
+BRIDGE_MAC = '02:00:00:00:00:01'
 
 
 class NetworkCommandError(RuntimeError):
@@ -46,6 +47,8 @@ class NetworkRuntime:
             raise NetworkCommandError(
                 f"existing interface {bridge_name} is not a bridge"
             )
+        self._run('ip', '-4', 'addr', 'flush', 'dev', bridge_name, 'scope', 'global')
+        self._run('ip', 'link', 'set', 'dev', bridge_name, 'address', BRIDGE_MAC)
         self._run('ip', 'link', 'set', 'dev', bridge_name, 'up')
 
     def setup_ue_namespace(self, namespace, veth, peer, ue_ip, bridge_name):
@@ -56,8 +59,7 @@ class NetworkRuntime:
         address = ipaddress.ip_address(ue_ip)
         if address.version != 4:
             raise ValueError('UE namespace setup requires an IPv4 address')
-        network = ipaddress.ip_network(f'{address}/24', strict=False)
-        gateway = str(network.network_address + 1)
+        gateway = '169.254.0.1'
 
         if namespace in self.namespaces():
             self.delete_ue_namespace(namespace)
@@ -74,7 +76,11 @@ class NetworkRuntime:
             self._run('ip', 'link', 'set', peer, 'netns', namespace)
             self._run(
                 'ip', 'netns', 'exec', namespace,
-                'ip', 'addr', 'replace', f'{address}/24', 'dev', peer,
+                'ip', 'addr', 'replace', f'{address}/32', 'dev', peer,
+            )
+            self._run(
+                'ip', 'netns', 'exec', namespace,
+                'ip', 'link', 'set', 'dev', peer, 'up',
             )
             self._run('ip', 'link', 'set', 'dev', veth, 'master', bridge_name)
             self._run('ip', 'link', 'set', 'dev', veth, 'up')
@@ -82,11 +88,16 @@ class NetworkRuntime:
                 'ip', 'netns', 'exec', namespace,
                 'ip', 'link', 'set', 'lo', 'up',
             )
-            self._run('ip', 'addr', 'replace', f'{gateway}/24', 'dev', bridge_name)
+            self._run('ip', 'addr', 'replace', f'{gateway}/16', 'dev', bridge_name)
+            self._run(
+                'ip', 'netns', 'exec', namespace,
+                'ip', 'neigh', 'replace', gateway,
+                'lladdr', BRIDGE_MAC, 'nud', 'permanent', 'dev', peer,
+            )
             self._run(
                 'ip', 'netns', 'exec', namespace,
                 'ip', 'route', 'replace', 'default',
-                'via', gateway, 'dev', peer,
+                'via', gateway, 'dev', peer, 'onlink',
             )
         except Exception:
             self.delete_ue_namespace(namespace)
